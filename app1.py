@@ -19,8 +19,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, confusion_matrix,
                              f1_score, precision_recall_curve, precision_score,
                              recall_score, roc_auc_score, roc_curve)
-from sklearn.model_selection import (RepeatedStratifiedKFold, cross_validate,
-                                     train_test_split)
+from scipy.stats import loguniform, randint, uniform
+from sklearn.model_selection import (RandomizedSearchCV, RepeatedStratifiedKFold,
+                                     cross_validate, train_test_split)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier
@@ -115,15 +116,71 @@ def make_model(name, p, pos_weight):
     return build_pipeline(clf)
 
 
+# ------------------------------------------------------------------ random search
+def search_space(name, pos_weight):
+    """Same search spaces as the notebook (keys prefixed for the pipeline)."""
+    if name in ("Logistic Regression", "LR + interactions"):
+        return {"clf__C": list(np.logspace(-3, 0.5, 8)), "clf__l1_ratio": [0.0, 0.25, 0.5, 0.75, 1.0]}
+    if name == "Decision Tree":
+        return {"clf__criterion": ["gini", "entropy"], "clf__max_depth": [2, 3, 4, 5, 6, 8],
+                "clf__min_samples_leaf": [5, 10, 20, 30, 50], "clf__ccp_alpha": [0.0, 0.002, 0.005, 0.01]}
+    if name == "Random Forest":
+        return {"clf__n_estimators": [300, 500, 800], "clf__max_depth": [3, 4, 5, 6, 8, 12, None],
+                "clf__min_samples_leaf": [1, 2, 3, 5, 8, 12], "clf__min_samples_split": [2, 5, 10, 20],
+                "clf__max_features": ["sqrt", "log2", 0.2, 0.35, 0.5], "clf__max_samples": [None, 0.6, 0.8],
+                "clf__criterion": ["gini", "entropy"],
+                "clf__class_weight": ["balanced", "balanced_subsample", None]}
+    return {"clf__n_estimators": randint(100, 600), "clf__max_depth": [1, 2, 3, 4],
+            "clf__learning_rate": loguniform(0.01, 0.2), "clf__subsample": uniform(0.5, 0.5),
+            "clf__colsample_bytree": uniform(0.3, 0.7), "clf__min_child_weight": randint(1, 15),
+            "clf__gamma": uniform(0, 3), "clf__reg_lambda": loguniform(1, 50),
+            "clf__reg_alpha": loguniform(1e-3, 5),
+            "clf__scale_pos_weight": [1.0, float(np.sqrt(pos_weight)), pos_weight]}
+
+
+def base_estimator_pipeline(name, pos_weight):
+    """Un-tuned pipeline used as the starting point of the random search."""
+    if name in ("Logistic Regression", "LR + interactions"):
+        return make_model(name, DEFAULTS[name], pos_weight)
+    if name == "Decision Tree":
+        return build_pipeline(DecisionTreeClassifier(class_weight="balanced", random_state=SEED))
+    if name == "Random Forest":
+        return build_pipeline(RandomForestClassifier(random_state=SEED, n_jobs=1))
+    return build_pipeline(XGBClassifier(objective="binary:logistic", eval_metric="logloss",
+                                        tree_method="hist", random_state=SEED, n_jobs=1, verbosity=0))
+
+
+def random_search(name, X_tr, y_tr, pos_weight, n_iter, tune_repeats):
+    space = search_space(name, pos_weight)
+    size = int(np.prod([len(v) for v in space.values()])) if all(isinstance(v, list) for v in space.values()) else n_iter
+    cv = RepeatedStratifiedKFold(n_splits=5, n_repeats=tune_repeats, random_state=SEED)
+    rs = RandomizedSearchCV(base_estimator_pipeline(name, pos_weight), space, n_iter=min(n_iter, size),
+                            scoring="roc_auc", cv=cv, n_jobs=-1, random_state=SEED, refit=False)
+    rs.fit(X_tr, y_tr)
+    return {k.replace("clf__", ""): v for k, v in rs.best_params_.items()}, rs.best_score_
+
+
+def to_plain(p):
+    return {k: (v.item() if isinstance(v, np.generic) else v) for k, v in p.items()}
+
+
 # ------------------------------------------------------------------ training
-def train_all(df, params, n_repeats, test_size, tie_tol, progress):
+def train_all(df, params, n_repeats, test_size, tie_tol, progress, auto=False, n_iter=20, tune_repeats=1):
     X, y = df.drop(columns=TARGET), df[TARGET]
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_size, stratify=y, random_state=SEED)
     pos_weight = float((y_tr == 0).sum() / (y_tr == 1).sum())
     rcv = RepeatedStratifiedKFold(n_splits=5, n_repeats=n_repeats, random_state=SEED + 1)
 
-    models, folds, rows, curves = {}, {}, [], {}
+    models, folds, rows, curves, tuned_scores = {}, {}, [], {}, {}
     for i, name in enumerate(MODEL_ORDER):
+        if auto:
+            progress.progress(i / len(MODEL_ORDER), text=f"Random search for {name} ...")
+            p, tune_score = random_search(name, X_tr, y_tr, pos_weight, n_iter, tune_repeats)
+            if name == "Random Forest":
+                p["max_depth"] = 0 if p["max_depth"] is None else p["max_depth"]
+                p["class_weight"] = "None" if p["class_weight"] is None else p["class_weight"]
+            tuned_scores[name] = tune_score
+            params = {**params, name: to_plain(p)}
         progress.progress(i / len(MODEL_ORDER), text=f"Training {name} ...")
         p = dict(params[name])
         if name == "XGBoost":
@@ -148,6 +205,8 @@ def train_all(df, params, n_repeats, test_size, tie_tol, progress):
     progress.progress(1.0, text="Done")
 
     summary = pd.DataFrame(rows).set_index("Model")
+    if auto:
+        summary.insert(0, "Search CV ROC-AUC", pd.Series(tuned_scores))
     summary["Overfit gap"] = summary["Train ROC-AUC (CV)"] - summary["CV ROC-AUC"]
     return dict(summary=summary, models=models, folds=folds, proba_test=curves,
                 X_tr=X_tr, X_te=X_te, y_tr=y_tr, y_te=y_te, params=params,
@@ -236,12 +295,24 @@ tie_tol = st.sidebar.slider("Tie tolerance (ROC-AUC)", 0.0, 0.05, 0.01, 0.005,
                             help="Models within this distance of the top CV score are 'tied'; "
                                  "the simplest tied model is selected.")
 st.sidebar.header("3 · Hyperparameters")
-st.sidebar.caption("Defaults are the best values found in your notebook. Change any of them, then retrain.")
-params = hyperparameter_ui()
-if st.sidebar.button("Reset to notebook values"):
-    for k in [k for k in st.session_state if k.split("_")[0] in {"lr", "dt", "rf", "xg"}]:
-        del st.session_state[k]
-    st.rerun()
+mode = st.sidebar.radio("How to set them?", ["Auto (random search)", "Manual"],
+                        help="Auto: the app searches the best hyperparameters for every model with "
+                             "cross-validated random search. Manual: you choose the values.")
+auto = mode.startswith("Auto")
+n_iter, tune_repeats, params = 20, 1, DEFAULTS
+if auto:
+    n_iter = st.sidebar.slider("Random-search iterations per model", 5, 80, 20, 5,
+                               help="Notebook used 40 (RF) and 80 (XGBoost). Small grids (LR, tree) are "
+                                    "capped at their size.")
+    tune_repeats = st.sidebar.slider("Search CV repeats (5-fold each)", 1, 3, 1)
+    st.sidebar.caption("Search uses different CV folds than the final comparison, so scores stay fair.")
+else:
+    st.sidebar.caption("Defaults are the best values found in your notebook. Change any, then retrain.")
+    params = hyperparameter_ui()
+    if st.sidebar.button("Reset to notebook values"):
+        for k in [k for k in st.session_state if k.split("_")[0] in {"lr", "dt", "rf", "xg"}]:
+            del st.session_state[k]
+        st.rerun()
 
 if upload is None:
     st.info("⬅️ Upload `WA_Fn-UseC_-HR-Employee-Attrition.csv` in the sidebar to start.")
@@ -261,7 +332,9 @@ c3.metric("Attrition rate", f"{df[TARGET].mean():.1%}")
 if st.button("🚀 Train & compare all models", type="primary"):
     bar = st.progress(0.0, text="Starting ...")
     try:
-        st.session_state.run = train_all(df, params, n_repeats, test_size, tie_tol, bar)
+        st.session_state.run = train_all(df, params, n_repeats, test_size, tie_tol, bar,
+                                         auto=auto, n_iter=n_iter, tune_repeats=tune_repeats)
+        st.session_state.run["auto"] = auto
     except Exception as exc:
         st.error(f"Training failed: {exc}")
     bar.empty()
@@ -303,6 +376,10 @@ with tab_cmp:
     fig.update_layout(title="Per-fold ROC-AUC (same folds for every model)", showlegend=False,
                       height=380, yaxis_title="ROC-AUC", margin=dict(t=50))
     st.plotly_chart(fig, width="stretch")
+    with st.expander("Hyperparameters used" + (" (found by random search)" if run.get("auto") else " (manual)")):
+        st.dataframe(pd.DataFrame({"hyperparameters": {n: str({k: (round(v, 4) if isinstance(v, float) else v)
+                                                              for k, v in run["params"][n].items()})
+                                                       for n in MODEL_ORDER}}), width="stretch")
     st.caption("Overfit gap = train AUC − validation AUC in CV. A large gap (typical for the Random Forest) means "
                "the model memorises training data.")
 
