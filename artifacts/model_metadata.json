@@ -1,0 +1,7 @@
+{
+    "selected_model": "Logistic Regression",
+    "selection_rule": "Simplest model within 0.01 ROC-AUC of the best mean cross-validation score",
+    "sklearn_version": "1.6.1",
+    "target": "Attrition",
+    "random_seed": 42
+}
