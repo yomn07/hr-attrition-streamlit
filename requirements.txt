@@ -6,3 +6,4 @@ scikit-learn==1.6.1
 joblib
 matplotlib
 plotly>=5.20
+xgboost>=2.0
