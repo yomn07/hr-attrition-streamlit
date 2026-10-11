@@ -63,6 +63,7 @@ st.caption(
 
 RANDOM_STATE = 42
 TARGET = "Attrition"
+DATA_PATH = Path(__file__).parent / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
 
 DATA_URLS = [
     (
@@ -83,42 +84,27 @@ DATA_URLS = [
 # ============================================================
 
 @st.cache_data(show_spinner="Loading the IBM HR Attrition dataset...")
-def load_data():
-    """Load the public IBM HR attrition dataset automatically."""
-
-    errors = []
-
-    for url in DATA_URLS:
+def load_dataset() -> pd.DataFrame:
+    if DATA_PATH.exists():
+        df = pd.read_csv(DATA_PATH)
+    else:
         try:
-            response = requests.get(url, timeout=20)
+            response = requests.get(DATA_URL, timeout=30)
             response.raise_for_status()
-
-            data = pd.read_csv(BytesIO(response.content))
-
-            if TARGET in data.columns and len(data) > 0:
-                return data
-
-            errors.append(f"{url}: target column not found")
-
+            df = pd.read_csv(BytesIO(response.content))
         except Exception as exc:
-            errors.append(f"{url}: {exc}")
+            raise RuntimeError(
+                "Could not load the IBM HR Attrition dataset. "
+                "Check your internet connection or place the CSV beside app.py."
+            ) from exc
 
-    raise RuntimeError(
-        "Could not download the dataset. Check your internet connection. "
-        + " | ".join(errors)
-    )
+    if TARGET not in df.columns:
+        raise ValueError(f"Dataset is missing the required column: {TARGET}")
 
+    if not set(df[TARGET].dropna().astype(str).unique()).issubset({"Yes", "No"}):
+        raise ValueError("Attrition must contain only Yes/No values.")
 
-try:
-    df = load_data()
-except Exception as exc:
-    st.error(f"Dataset loading failed: {exc}")
-    st.info(
-        "The application downloads the dataset automatically, "
-        "so an internet connection is required on first load."
-    )
-    st.stop()
-
+    return df
 
 # ============================================================
 # DATA PREPARATION
