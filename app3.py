@@ -109,7 +109,15 @@ def load_dataset() -> pd.DataFrame:
 # ============================================================
 # DATA PREPARATION
 # ============================================================
-
+try:
+    df = load_data()
+except Exception as exc:
+    st.error(f"Dataset loading failed: {exc}")
+    st.info(
+        "The application downloads the dataset automatically, "
+        "so an internet connection is required on first load."
+    )
+    st.stop()
 # Remove columns that are identifiers or have only one unique value.
 # This prevents the models from learning meaningless ID patterns.
 drop_columns = []
