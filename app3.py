@@ -84,7 +84,7 @@ DATA_URLS = [
 # ============================================================
 
 @st.cache_data(show_spinner="Loading the IBM HR Attrition dataset...")
-def load_dataset() -> pd.DataFrame:
+def load_data() -> pd.DataFrame:
     if DATA_PATH.exists():
         df = pd.read_csv(DATA_PATH)
     else:
