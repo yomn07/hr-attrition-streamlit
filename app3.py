@@ -1104,7 +1104,7 @@ with tab_models:
             "Choose model for feature importance",
             options=[
                 "Logistic Regression",
-                "Random Forest
+                "Random Forest",
                 "XGBoost",
                 "Gradient Boosting",
                 "Decision Tree",
