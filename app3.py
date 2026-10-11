@@ -609,14 +609,14 @@ with tab_eda:
         st.pyplot(fig)
         plt.close(fig)
 
+    
     with right:
         st.subheader("Missingness by column")
-        missing = (
-            df.isna().sum()
-            .rename("Missing cells")
-            .reset_index(names="Column")
-        )
+    
+        missing = df.isna().sum().rename("Missing cells").reset_index()
+        missing.columns = ["Column", "Missing cells"]
         missing = missing[missing["Missing cells"] > 0]
+    
         if missing.empty:
             st.success("No missing cells found in the loaded dataset.")
         else:
@@ -625,6 +625,7 @@ with tab_eda:
                 use_container_width=True,
                 hide_index=True,
             )
+
 
     st.subheader("Attrition rate by category")
     category_candidates = [
