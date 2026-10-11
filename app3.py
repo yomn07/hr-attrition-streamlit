@@ -19,6 +19,7 @@ from sklearn.ensemble import (
     RandomForestClassifier,
     GradientBoostingClassifier,
 )
+from xgboost import XGBClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -57,7 +58,7 @@ st.set_page_config(
 
 st.title("📊 HR Employee Attrition Analytics")
 st.caption(
-    "Explore employee attrition, compare six machine-learning models, "
+    "Explore employee attrition, compare seven machine-learning models, "
     "estimate attrition risk, and evaluate potential business impact."
 )
 
@@ -268,12 +269,12 @@ def make_preprocessor(scale_numeric=False):
 
 
 # ============================================================
-# SIX MODEL DEFINITIONS
+# seven MODEL DEFINITIONS
 # ============================================================
 
 def model_search_spaces():
     """
-    Return the six classifiers and their hyperparameter spaces.
+    Return the seven classifiers and their hyperparameter spaces.
 
     All preprocessing is inside each Pipeline so that the
     cross-validation folds do not share imputed or scaled data.
@@ -336,7 +337,48 @@ def model_search_spaces():
             ],
         },
     )
-
+        # 7. XGBoost
+    models["XGBoost"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(),
+            ),
+            (
+                "classifier",
+                XGBClassifier(
+                    random_state=RANDOM_STATE,
+                    eval_metric="logloss",
+                    objective="binary:logistic",
+                    n_jobs=1,
+                    verbosity=0,
+                ),
+            ),
+        ]),
+        {
+            "classifier__n_estimators": [
+                100, 200, 300
+            ],
+            "classifier__max_depth": [
+                2, 3, 5, 7
+            ],
+            "classifier__learning_rate": [
+                0.01, 0.03, 0.05, 0.1
+            ],
+            "classifier__subsample": [
+                0.7, 0.85, 1.0
+            ],
+            "classifier__colsample_bytree": [
+                0.7, 0.85, 1.0
+            ],
+            "classifier__min_child_weight": [
+                1, 3, 5
+            ],
+            "classifier__reg_lambda": [
+                1, 5, 10
+            ],
+        },
+    )
     # 3. Gradient Boosting
     models["Gradient Boosting"] = (
         Pipeline([
@@ -524,7 +566,7 @@ def train_and_tune(
             (index + 1) / len(models)
         )
 
-    status.success("All six models have been trained and tuned.")
+    status.success("All seven models have been trained and tuned.")
 
     return best_models, pd.DataFrame(cv_results)
 
@@ -840,7 +882,7 @@ with tab_eda:
 # ============================================================
 
 with tab_models:
-    st.header("Train and compare six machine-learning models")
+    st.header("Train and compare seven machine-learning models")
 
     st.markdown(
         """
@@ -852,6 +894,7 @@ with tab_models:
     model_names = [
         "Logistic Regression",
         "Random Forest",
+        "XGBoost",
         "Gradient Boosting",
         "Support Vector Machine",
         "K-Nearest Neighbors",
@@ -864,7 +907,7 @@ with tab_models:
         )
 
     if st.button(
-        "🚀 Train and tune all six models",
+        "🚀 Train and tune all seven models",
         type="primary",
         use_container_width=True,
     ):
@@ -908,7 +951,7 @@ with tab_models:
             st.session_state.calibrated_model = None
             st.session_state.calibrated_model_name = None
 
-            st.success("All six models were trained successfully.")
+            st.success("All seven models were trained successfully.")
 
         except Exception as exc:
             st.error(f"Training failed: {exc}")
@@ -1061,7 +1104,8 @@ with tab_models:
             "Choose model for feature importance",
             options=[
                 "Logistic Regression",
-                "Random Forest",
+                "Random Forest
+                "XGBoost",
                 "Gradient Boosting",
                 "Decision Tree",
             ],
@@ -1238,7 +1282,7 @@ with tab_prediction:
 
     if st.session_state.trained_models is None:
         st.info(
-            "Open the Model Lab tab and train the six models first."
+            "Open the Model Lab tab and train the seven models first."
         )
     else:
         selected_model_name = st.selectbox(
