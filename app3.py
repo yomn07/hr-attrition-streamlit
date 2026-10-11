@@ -56,7 +56,11 @@ st.set_page_config(
 
 DATA_PATH = Path(__file__).parent / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
 
-
+DATA_URL = (
+    "https://raw.githubusercontent.com/"
+    "IamVasil/IBM-HR-Analytics-Employee-Attrition-Performance/main/"
+    "WA_Fn-UseC_-HR-Employee-Attrition.csv"
+)
 TARGET = "Attrition"
 
 # These fields are constant, administrative, or identifiers rather than
@@ -84,13 +88,29 @@ sns.set_theme(style="whitegrid")
 # ---------------------------------------------------------------------
 
 @st.cache_data(show_spinner="Loading the IBM HR Attrition dataset...")
-def load_dataset():
-    if not DATA_PATH.exists():
-        raise FileNotFoundError(
-            f"Dataset not found: {DATA_PATH.name}. "
-            "Check that the CSV is committed to your Git repository."
-        )
-    return pd.read_csv(DATA_PATH)
+
+
+def load_dataset() -> pd.DataFrame:
+    if DATA_PATH.exists():
+        df = pd.read_csv(DATA_PATH)
+    else:
+        try:
+            response = requests.get(DATA_URL, timeout=30)
+            response.raise_for_status()
+            df = pd.read_csv(BytesIO(response.content))
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not load the IBM HR Attrition dataset. "
+                "Check your internet connection or place the CSV beside app.py."
+            ) from exc
+
+    if TARGET not in df.columns:
+        raise ValueError(f"Dataset is missing the required column: {TARGET}")
+
+    if not set(df[TARGET].dropna().astype(str).unique()).issubset({"Yes", "No"}):
+        raise ValueError("Attrition must contain only Yes/No values.")
+
+    return df
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
