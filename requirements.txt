@@ -7,3 +7,6 @@ joblib
 matplotlib
 plotly>=5.20
 xgboost>=2.0
+seaborn>=0.13
+requests>=2.31
+
