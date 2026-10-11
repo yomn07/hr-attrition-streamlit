@@ -1273,6 +1273,9 @@ with tab_fairness:
                 )
 
                 st.markdown(
+                     "Fairness metrics are descriptive indicators, not proof of fairness "
+                        "or legal compliance. Review group sizes, data quality, uncertainty, "
+                        "and relevant employment regulations before drawing conclusions."
 
                 )
 
