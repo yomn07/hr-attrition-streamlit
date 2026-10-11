@@ -4,6 +4,7 @@ from __future__ import annotations
 import warnings
 from io import BytesIO
 from typing import Any
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
