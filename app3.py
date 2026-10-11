@@ -1,1287 +1,1680 @@
 
-from __future__ import annotations
-
 import warnings
-from io import BytesIO
-from typing import Any
-from pathlib import Path
+warnings.filterwarnings("ignore")
 
-import matplotlib.pyplot as plt
+from pathlib import Path
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import requests
-import seaborn as sns
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 
 from sklearn.base import clone
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import (
-    ExtraTreesClassifier,
-    GradientBoostingClassifier,
-    HistGradientBoostingClassifier,
     RandomForestClassifier,
+    GradientBoostingClassifier,
 )
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     brier_score_loss,
     confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
+    cross_val_score,
     train_test_split,
 )
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
-warnings.filterwarnings("ignore", category=FutureWarning)
 
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
+# ============================================================
+# APP CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="HR Attrition Analytics",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-DATA_PATH = Path(__file__).parent / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
-
-DATA_URL = (
-    "https://raw.githubusercontent.com/"
-    "IamVasil/IBM-HR-Analytics-Employee-Attrition-Performance/main/"
-    "WA_Fn-UseC_-HR-Employee-Attrition.csv"
+st.title("📊 HR Employee Attrition Analytics")
+st.caption(
+    "Explore employee attrition, compare six machine-learning models, "
+    "estimate attrition risk, and evaluate potential business impact."
 )
+
+RANDOM_STATE = 42
 TARGET = "Attrition"
 
-# These fields are constant, administrative, or identifiers rather than
-# useful employee-level predictors.
-DROP_FEATURES = [
-    "EmployeeNumber",
-    "EmployeeCount",
-    "Over18",
-    "StandardHours",
+DATA_URLS = [
+    (
+        "https://raw.githubusercontent.com/"
+        "IBM/employee-attrition-aif360/master/data/"
+        "WA_Fn-UseC_-HR-Employee-Attrition.csv"
+    ),
+    (
+        "https://raw.githubusercontent.com/"
+        "IBM/employee-attrition-aif360/main/data/"
+        "WA_Fn-UseC_-HR-Employee-Attrition.csv"
+    ),
 ]
 
-SENSITIVE_FEATURES = [
-    "Gender",
-    "Age",
-    "Department",
-    "MaritalStatus",
-    "JobLevel",
-]
 
-sns.set_theme(style="whitegrid")
-
-
-# ---------------------------------------------------------------------
-# Dataset loading and validation
-# ---------------------------------------------------------------------
+# ============================================================
+# DATA LOADING
+# ============================================================
 
 @st.cache_data(show_spinner="Loading the IBM HR Attrition dataset...")
+def load_data():
+    """Load the public IBM HR attrition dataset automatically."""
 
+    errors = []
 
-def load_dataset() -> pd.DataFrame:
-    if DATA_PATH.exists():
-        df = pd.read_csv(DATA_PATH)
-    else:
+    for url in DATA_URLS:
         try:
-            response = requests.get(DATA_URL, timeout=30)
+            response = requests.get(url, timeout=20)
             response.raise_for_status()
-            df = pd.read_csv(BytesIO(response.content))
+
+            data = pd.read_csv(BytesIO(response.content))
+
+            if TARGET in data.columns and len(data) > 0:
+                return data
+
+            errors.append(f"{url}: target column not found")
+
         except Exception as exc:
-            raise RuntimeError(
-                "Could not load the IBM HR Attrition dataset. "
-                "Check your internet connection or place the CSV beside app.py."
-            ) from exc
+            errors.append(f"{url}: {exc}")
 
-    if TARGET not in df.columns:
-        raise ValueError(f"Dataset is missing the required column: {TARGET}")
-
-    if not set(df[TARGET].dropna().astype(str).unique()).issubset({"Yes", "No"}):
-        raise ValueError("Attrition must contain only Yes/No values.")
-
-    return df
-
-
-def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    return [
-        column
-        for column in df.columns
-        if column != TARGET and column not in DROP_FEATURES
-    ]
-
-
-def prepare_features(
-    df: pd.DataFrame,
-    feature_columns: list[str],
-) -> tuple[list[str], list[str]]:
-    numeric = df[feature_columns].select_dtypes(
-        include=["number", "bool"]
-    ).columns.tolist()
-
-    categorical = [
-        column for column in feature_columns if column not in numeric
-    ]
-
-    return numeric, categorical
-
-
-def make_pipeline(
-    X: pd.DataFrame,
-    classifier: Any,
-) -> Pipeline:
-    numeric, categorical = prepare_features(X, X.columns.tolist())
-
-    numeric_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
+    raise RuntimeError(
+        "Could not download the dataset. Check your internet connection. "
+        + " | ".join(errors)
     )
 
-    categorical_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            (
-                "onehot",
-                OneHotEncoder(
-                    handle_unknown="ignore",
-                    sparse_output=False,
-                ),
-            ),
-        ]
-    )
 
-    preprocess = ColumnTransformer(
+try:
+    df = load_data()
+except Exception as exc:
+    st.error(f"Dataset loading failed: {exc}")
+    st.info(
+        "The application downloads the dataset automatically, "
+        "so an internet connection is required on first load."
+    )
+    st.stop()
+
+
+# ============================================================
+# DATA PREPARATION
+# ============================================================
+
+# Remove columns that are identifiers or have only one unique value.
+# This prevents the models from learning meaningless ID patterns.
+drop_columns = []
+
+for col in df.columns:
+    if col == TARGET:
+        continue
+
+    if df[col].nunique(dropna=False) <= 1:
+        drop_columns.append(col)
+
+# EmployeeNumber is an identifier, not a meaningful predictor.
+if "EmployeeNumber" in df.columns:
+    drop_columns.append("EmployeeNumber")
+
+df = df.drop(columns=list(set(drop_columns)), errors="ignore")
+
+# Normalize the binary target.
+df[TARGET] = (
+    df[TARGET]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .map({"yes": 1, "no": 0, "1": 1, "0": 0})
+)
+
+df = df.dropna(subset=[TARGET]).copy()
+df[TARGET] = df[TARGET].astype(int)
+
+X = df.drop(columns=[TARGET])
+y = df[TARGET]
+
+numeric_features = X.select_dtypes(
+    include=["number", "bool"]
+).columns.tolist()
+
+categorical_features = [
+    col for col in X.columns
+    if col not in numeric_features
+]
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header("⚙️ Settings")
+
+test_size = st.sidebar.slider(
+    "Test set percentage",
+    min_value=10,
+    max_value=40,
+    value=20,
+    step=5,
+)
+
+cv_folds = st.sidebar.selectbox(
+    "Cross-validation folds",
+    options=[3, 4, 5],
+    index=2,
+)
+
+scoring = st.sidebar.selectbox(
+    "Model tuning metric",
+    options=[
+        "roc_auc",
+        "average_precision",
+        "f1",
+        "recall",
+        "accuracy",
+    ],
+    index=0,
+)
+
+search_iterations = st.sidebar.slider(
+    "Randomized search iterations per model",
+    min_value=3,
+    max_value=20,
+    value=8,
+)
+
+st.sidebar.caption(
+    "Changing the training settings requires retraining the models."
+)
+
+
+# ============================================================
+# PREPROCESSING PIPELINES
+# ============================================================
+
+def make_one_hot_encoder():
+    """Support both newer and older scikit-learn versions."""
+    try:
+        return OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=False,
+        )
+    except TypeError:
+        return OneHotEncoder(
+            handle_unknown="ignore",
+            sparse=False,
+        )
+
+
+def make_preprocessor(scale_numeric=False):
+    """
+    Impute missing values and encode categorical features.
+    Scale numeric features for distance- and margin-based models.
+    """
+
+    numeric_steps = [
+        ("imputer", SimpleImputer(strategy="median"))
+    ]
+
+    if scale_numeric:
+        numeric_steps.append(
+            ("scaler", StandardScaler())
+        )
+
+    numeric_pipeline = Pipeline(numeric_steps)
+
+    categorical_pipeline = Pipeline([
+        (
+            "imputer",
+            SimpleImputer(strategy="most_frequent"),
+        ),
+        (
+            "encoder",
+            make_one_hot_encoder(),
+        ),
+    ])
+
+    return ColumnTransformer(
         transformers=[
-            ("numeric", numeric_pipeline, numeric),
-            ("categorical", categorical_pipeline, categorical),
+            (
+                "numeric",
+                numeric_pipeline,
+                numeric_features,
+            ),
+            (
+                "categorical",
+                categorical_pipeline,
+                categorical_features,
+            ),
         ],
         remainder="drop",
-        verbose_feature_names_out=False,
-    )
-
-    return Pipeline(
-        steps=[
-            ("preprocess", preprocess),
-            ("classifier", classifier),
-        ]
     )
 
 
-# ---------------------------------------------------------------------
-# Five-model tuning
-# ---------------------------------------------------------------------
+# ============================================================
+# SIX MODEL DEFINITIONS
+# ============================================================
 
-def model_search_spaces() -> dict[str, tuple[Any, dict[str, list[Any]]]]:
-    return {
-        "Logistic Regression": (
-            LogisticRegression(
-                max_iter=2500,
-                class_weight="balanced",
-                random_state=42,
+def model_search_spaces():
+    """
+    Return the six classifiers and their hyperparameter spaces.
+
+    All preprocessing is inside each Pipeline so that the
+    cross-validation folds do not share imputed or scaled data.
+    """
+
+    models = {}
+
+    # 1. Logistic Regression
+    models["Logistic Regression"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(scale_numeric=True),
             ),
-            {
-                "classifier__C": [0.03, 0.1, 0.3, 1.0, 3.0, 10.0],
-                "classifier__solver": ["lbfgs"],
-            },
-        ),
-        "Random Forest": (
-            RandomForestClassifier(
-                class_weight="balanced",
-                random_state=42,
-                n_jobs=1,
+            (
+                "classifier",
+                LogisticRegression(
+                    max_iter=3000,
+                    class_weight="balanced",
+                    random_state=RANDOM_STATE,
+                ),
             ),
-            {
-                "classifier__n_estimators": [150, 250, 400],
-                "classifier__max_depth": [None, 5, 10, 16],
-                "classifier__min_samples_leaf": [1, 2, 4, 8],
-                "classifier__max_features": ["sqrt", 0.7],
-            },
-        ),
-        "Extra Trees": (
-            ExtraTreesClassifier(
-                class_weight="balanced",
-                random_state=42,
-                n_jobs=1,
+        ]),
+        {
+            "classifier__C": [
+                0.01, 0.1, 0.5, 1.0, 3.0, 10.0
+            ],
+            "classifier__solver": ["lbfgs"],
+        },
+    )
+
+    # 2. Random Forest
+    models["Random Forest"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(),
             ),
-            {
-                "classifier__n_estimators": [150, 250, 400],
-                "classifier__max_depth": [None, 5, 10, 16],
-                "classifier__min_samples_leaf": [1, 2, 4, 8],
-                "classifier__max_features": ["sqrt", 0.7],
-            },
-        ),
-        "Gradient Boosting": (
-            GradientBoostingClassifier(random_state=42),
-            {
-                "classifier__n_estimators": [75, 125, 200],
-                "classifier__learning_rate": [0.025, 0.05, 0.1],
-                "classifier__max_depth": [1, 2, 3],
-                "classifier__subsample": [0.8, 1.0],
-            },
-        ),
-        "Histogram Gradient Boosting": (
-            HistGradientBoostingClassifier(random_state=42),
-            {
-                "classifier__max_iter": [100, 175, 250],
-                "classifier__learning_rate": [0.03, 0.07, 0.1],
-                "classifier__max_leaf_nodes": [7, 15, 31],
-                "classifier__l2_regularization": [0.0, 0.5, 1.0],
-            },
-        ),
-    }
+            (
+                "classifier",
+                RandomForestClassifier(
+                    random_state=RANDOM_STATE,
+                    class_weight="balanced",
+                    n_jobs=1,
+                ),
+            ),
+        ]),
+        {
+            "classifier__n_estimators": [
+                100, 200, 300
+            ],
+            "classifier__max_depth": [
+                None, 8, 12, 20
+            ],
+            "classifier__min_samples_leaf": [
+                1, 2, 4
+            ],
+            "classifier__max_features": [
+                "sqrt", 0.7
+            ],
+        },
+    )
+
+    # 3. Gradient Boosting
+    models["Gradient Boosting"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(),
+            ),
+            (
+                "classifier",
+                GradientBoostingClassifier(
+                    random_state=RANDOM_STATE,
+                ),
+            ),
+        ]),
+        {
+            "classifier__n_estimators": [
+                50, 100, 150, 200
+            ],
+            "classifier__learning_rate": [
+                0.01, 0.03, 0.05, 0.1
+            ],
+            "classifier__max_depth": [
+                1, 2, 3
+            ],
+            "classifier__min_samples_leaf": [
+                1, 2, 4
+            ],
+            "classifier__subsample": [
+                0.7, 0.85, 1.0
+            ],
+        },
+    )
+
+    # 4. Support Vector Machine
+    models["Support Vector Machine"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(scale_numeric=True),
+            ),
+            (
+                "classifier",
+                SVC(
+                    probability=True,
+                    class_weight="balanced",
+                    random_state=RANDOM_STATE,
+                ),
+            ),
+        ]),
+        {
+            "classifier__C": [
+                0.1, 0.5, 1.0, 3.0, 10.0
+            ],
+            "classifier__kernel": [
+                "rbf", "linear"
+            ],
+            "classifier__gamma": [
+                "scale", "auto"
+            ],
+        },
+    )
+
+    # 5. K-Nearest Neighbors
+    models["K-Nearest Neighbors"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(scale_numeric=True),
+            ),
+            (
+                "classifier",
+                KNeighborsClassifier(
+                    n_jobs=1,
+                ),
+            ),
+        ]),
+        {
+            "classifier__n_neighbors": [
+                3, 5, 7, 9, 13, 17
+            ],
+            "classifier__weights": [
+                "uniform", "distance"
+            ],
+            "classifier__p": [1, 2],
+        },
+    )
+
+    # 6. Decision Tree
+    models["Decision Tree"] = (
+        Pipeline([
+            (
+                "preprocessor",
+                make_preprocessor(),
+            ),
+            (
+                "classifier",
+                DecisionTreeClassifier(
+                    random_state=RANDOM_STATE,
+                    class_weight="balanced",
+                ),
+            ),
+        ]),
+        {
+            "classifier__max_depth": [
+                None, 3, 5, 8, 12, 20
+            ],
+            "classifier__min_samples_split": [
+                2, 5, 10, 20
+            ],
+            "classifier__min_samples_leaf": [
+                1, 2, 4, 8
+            ],
+            "classifier__criterion": [
+                "gini", "entropy"
+            ],
+        },
+    )
+
+    return models
+
+
+# ============================================================
+# TRAINING AND HYPERPARAMETER TUNING
+# ============================================================
+
+def safe_auc(y_true, probabilities):
+    """Return ROC-AUC, or NaN if it cannot be calculated."""
+    try:
+        return roc_auc_score(y_true, probabilities)
+    except Exception:
+        return np.nan
 
 
 def train_and_tune(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    iterations: int,
-    cv_folds: int,
-) -> tuple[dict[str, Any], pd.DataFrame]:
-    results = {}
-    rows = []
+    X_train,
+    y_train,
+    cv_folds,
+    scoring,
+    search_iterations,
+):
+    models = model_search_spaces()
 
     cv = StratifiedKFold(
         n_splits=cv_folds,
         shuffle=True,
-        random_state=42,
+        random_state=RANDOM_STATE,
     )
 
-    spaces = model_search_spaces()
+    best_models = {}
+    cv_results = []
 
-    progress = st.progress(0.0)
+    progress = st.progress(0)
     status = st.empty()
 
-    for index, (name, (classifier, params)) in enumerate(spaces.items()):
-        status.write(f"**Tuning {name}** ({index + 1}/{len(spaces)})")
-
-        pipeline = make_pipeline(X_train, classifier)
+    for index, (name, (pipeline, parameters)) in enumerate(
+        models.items()
+    ):
+        status.write(
+            f"Training model {index + 1}/{len(models)}: **{name}**"
+        )
 
         search = RandomizedSearchCV(
             estimator=pipeline,
-            param_distributions=params,
-            n_iter=iterations,
-            scoring="roc_auc",
+            param_distributions=parameters,
+            n_iter=search_iterations,
+            scoring=scoring,
             cv=cv,
-            n_jobs=-1,
-            random_state=42,
             refit=True,
+            random_state=RANDOM_STATE,
+            n_jobs=-1,
             error_score="raise",
-            return_train_score=False,
         )
 
         search.fit(X_train, y_train)
 
-        results[name] = {
-            "search": search,
-            "model": search.best_estimator_,
-            "best_params": search.best_params_,
-            "cv_auc": float(search.best_score_),
-        }
+        best_models[name] = search.best_estimator_
 
-        rows.append(
-            {
-                "Model": name,
-                "Best CV ROC-AUC": search.best_score_,
-                "Best parameters": str(search.best_params_),
-            }
+        cv_results.append({
+            "Model": name,
+            "Best CV score": search.best_score_,
+            "Best parameters": str(search.best_params_),
+        })
+
+        progress.progress(
+            (index + 1) / len(models)
         )
 
-        progress.progress((index + 1) / len(spaces))
+    status.success("All six models have been trained and tuned.")
 
-    status.success("All five models have been tuned.")
-    progress.empty()
-
-    table = pd.DataFrame(rows).sort_values(
-        "Best CV ROC-AUC", ascending=False
-    )
-
-    return results, table
+    return best_models, pd.DataFrame(cv_results)
 
 
-def positive_probabilities(model: Any, X: pd.DataFrame) -> np.ndarray:
-    probabilities = model.predict_proba(X)
-    classes = list(model.classes_)
+# ============================================================
+# EVALUATION
+# ============================================================
 
-    if "Yes" not in classes:
-        raise ValueError("The fitted model does not contain the Yes class.")
+def evaluate_models(models, X_test, y_test):
+    rows = []
+    probabilities = {}
+    predictions = {}
 
-    return probabilities[:, classes.index("Yes")]
+    for name, model in models.items():
+        y_pred = model.predict(X_test)
 
-
-def metrics_at_threshold(
-    y_true: pd.Series,
-    probabilities: np.ndarray,
-    threshold: float,
-) -> dict[str, float]:
-    truth = (pd.Series(y_true).astype(str).to_numpy() == "Yes").astype(int)
-    predicted = (probabilities >= threshold).astype(int)
-
-    return {
-        "ROC-AUC": roc_auc_score(truth, probabilities),
-        "Accuracy": accuracy_score(truth, predicted),
-        "Precision": precision_score(truth, predicted, zero_division=0),
-        "Recall": recall_score(truth, predicted, zero_division=0),
-        "F1": f1_score(truth, predicted, zero_division=0),
-        "Brier score": brier_score_loss(truth, probabilities),
-    }
-
-
-# ---------------------------------------------------------------------
-# Evaluation and diagnostics
-# ---------------------------------------------------------------------
-
-def plot_confusion(y_true, probabilities, threshold):
-    truth = (pd.Series(y_true).astype(str).to_numpy() == "Yes").astype(int)
-    predicted = (probabilities >= threshold).astype(int)
-
-    matrix = confusion_matrix(truth, predicted, labels=[0, 1])
-
-    fig, ax = plt.subplots(figsize=(5, 4))
-    sns.heatmap(
-        matrix,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        cbar=False,
-        xticklabels=["Predicted stay", "Predicted leave"],
-        yticklabels=["Actual stay", "Actual leave"],
-        ax=ax,
-    )
-    ax.set_xlabel("Prediction")
-    ax.set_ylabel("Actual outcome")
-    ax.set_title("Confusion matrix")
-    fig.tight_layout()
-    return fig
-
-
-def plot_calibration(y_true, probabilities):
-    truth = (pd.Series(y_true).astype(str).to_numpy() == "Yes").astype(int)
-
-    fraction_positive, mean_predicted = calibration_curve(
-        truth,
-        probabilities,
-        n_bins=8,
-        strategy="quantile",
-    )
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-    ax.plot(
-        mean_predicted,
-        fraction_positive,
-        marker="o",
-        label="Model",
-    )
-    ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
-    ax.set_xlabel("Mean predicted attrition probability")
-    ax.set_ylabel("Observed attrition rate")
-    ax.set_title("Calibration / reliability curve")
-    ax.legend()
-    fig.tight_layout()
-    return fig
-
-
-def plot_feature_importance(model: Pipeline, top_n: int = 15):
-    classifier = model.named_steps["classifier"]
-    preprocess = model.named_steps["preprocess"]
-
-    if hasattr(classifier, "feature_importances_"):
-        importance = classifier.feature_importances_
-    elif hasattr(classifier, "coef_"):
-        importance = np.abs(classifier.coef_[0])
-    else:
-        return None
-
-    try:
-        names = preprocess.get_feature_names_out()
-    except Exception:
-        names = [f"Feature {i + 1}" for i in range(len(importance))]
-
-    table = pd.DataFrame(
-        {"Feature": names, "Importance": importance}
-    ).sort_values("Importance", ascending=False).head(top_n)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    sns.barplot(
-        data=table,
-        x="Importance",
-        y="Feature",
-        ax=ax,
-    )
-    ax.set_title(f"Top {len(table)} model features")
-    fig.tight_layout()
-    return fig
-
-
-def fairness_report(
-    df: pd.DataFrame,
-    y_true: pd.Series,
-    probabilities: np.ndarray,
-    threshold: float,
-    group_column: str,
-) -> pd.DataFrame:
-    actual = (pd.Series(y_true).astype(str).to_numpy() == "Yes").astype(int)
-    predicted = (probabilities >= threshold).astype(int)
-
-    groups = df[group_column].reset_index(drop=True)
-    records = []
-
-    for group in groups.dropna().unique():
-        mask = (groups == group).to_numpy()
-        group_actual = actual[mask]
-        group_predicted = predicted[mask]
-
-        positives = int(group_actual.sum())
-        negatives = int(len(group_actual) - positives)
-
-        tpr = (
-            float(((group_predicted == 1) & (group_actual == 1)).sum() / positives)
-            if positives else np.nan
-        )
-        fpr = (
-            float(((group_predicted == 1) & (group_actual == 0)).sum() / negatives)
-            if negatives else np.nan
-        )
-
-        records.append(
-            {
-                "Group": str(group),
-                "Employees": int(mask.sum()),
-                "Observed attrition rate": float(group_actual.mean()),
-                "Flagged rate": float(group_predicted.mean()),
-                "True positive rate": tpr,
-                "False positive rate": fpr,
-            }
-        )
-
-    report = pd.DataFrame(records)
-    if report.empty:
-        return report
-
-    max_flagged = report["Flagged rate"].max()
-    min_flagged = report["Flagged rate"].min()
-
-    report["Flagged-rate gap vs. highest"] = max_flagged - report["Flagged rate"]
-    report["Flagged-rate ratio vs. highest"] = np.where(
-        max_flagged > 0,
-        report["Flagged rate"] / max_flagged,
-        np.nan,
-    )
-
-    report.attrs["tpr_gap"] = (
-        report["True positive rate"].max()
-        - report["True positive rate"].min()
-    )
-    report.attrs["fpr_gap"] = (
-        report["False positive rate"].max()
-        - report["False positive rate"].min()
-    )
-    report.attrs["flagged_rate_gap"] = max_flagged - min_flagged
-
-    return report.sort_values("Employees", ascending=False)
-
-
-# ---------------------------------------------------------------------
-# App shell
-# ---------------------------------------------------------------------
-
-st.title("📊 HR Attrition Analytics")
-st.caption(
-    "Explore employee attrition, compare tuned models, estimate business "
-    "impact, and inspect group-level fairness metrics."
-)
-
-st.info(
-    "This app supports workforce planning and human review. A model score "
-    "is uncertain, is not a causal explanation, and should not be used as "
-    "the sole basis for employment decisions."
-)
-
-try:
-    df = load_dataset()
-except Exception as exc:
-    st.error(str(exc))
-    st.stop()
-
-feature_columns = get_feature_columns(df)
-
-if df[TARGET].nunique() != 2:
-    st.error("Expected a binary Yes/No Attrition target.")
-    st.stop()
-
-# Target is encoded as strings for interpretable positive-class handling.
-y = df[TARGET].astype(str)
-X = df[feature_columns].copy()
-
-# Remove constant columns, if any.
-constant_columns = [
-    col for col in X.columns if X[col].nunique(dropna=False) <= 1
-]
-X = X.drop(columns=constant_columns)
-feature_columns = X.columns.tolist()
-
-with st.sidebar:
-    st.header("Dataset")
-    st.write(f"**Rows:** {len(df):,}")
-    st.write(f"**Columns:** {df.shape[1]:,}")
-    st.write(f"**Model features:** {len(feature_columns):,}")
-    st.write(f"**Missing cells:** {int(df.isna().sum().sum()):,}")
-
-    st.divider()
-    st.header("Model settings")
-
-    test_size = st.slider(
-        "Test-set proportion",
-        min_value=0.15,
-        max_value=0.35,
-        value=0.25,
-        step=0.05,
-    )
-    cv_folds = st.selectbox("Cross-validation folds", [3, 4, 5], index=0)
-    iterations = st.select_slider(
-        "Randomized tuning iterations per model",
-        options=[3, 5, 8, 12],
-        value=5,
-    )
-    seed = st.number_input(
-        "Random seed",
-        min_value=0,
-        max_value=10000,
-        value=42,
-        step=1,
-    )
-
-    st.caption(
-        "More iterations can improve tuning but increase training time."
-    )
-
-tab_eda, tab_models, tab_predict, tab_impact, tab_fairness = st.tabs(
-    [
-        "🔎 EDA",
-        "🧪 Model lab",
-        "🎯 Prediction",
-        "💼 Business impact",
-        "⚖️ Fairness",
-    ]
-)
-
-# ---------------------------------------------------------------------
-# EDA
-# ---------------------------------------------------------------------
-
-with tab_eda:
-    st.header("Exploratory data analysis")
-
-    attrition_rate = (y == "Yes").mean()
-    total_attrition = int((y == "Yes").sum())
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Employees", f"{len(df):,}")
-    c2.metric("Attrition cases", f"{total_attrition:,}")
-    c3.metric("Observed attrition", f"{attrition_rate:.1%}")
-    c4.metric("Missing cells", f"{int(df.isna().sum().sum()):,}")
-
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Attrition distribution")
-        counts = y.value_counts().reindex(["No", "Yes"], fill_value=0)
-        fig, ax = plt.subplots(figsize=(5, 4))
-        sns.barplot(
-            x=counts.index,
-            y=counts.values,
-            ax=ax,
-        )
-        ax.set_xlabel("Attrition")
-        ax.set_ylabel("Employees")
-        ax.set_title("Stay vs. leave")
-        st.pyplot(fig)
-        plt.close(fig)
-
-    
-    with right:
-        st.subheader("Missingness by column")
-    
-        missing = df.isna().sum().rename("Missing cells").reset_index()
-        missing.columns = ["Column", "Missing cells"]
-        missing = missing[missing["Missing cells"] > 0]
-    
-        if missing.empty:
-            st.success("No missing cells found in the loaded dataset.")
+        if hasattr(model, "predict_proba"):
+            y_prob = model.predict_proba(X_test)[:, 1]
         else:
-            st.dataframe(
-                missing.sort_values("Missing cells", ascending=False),
-                use_container_width=True,
-                hide_index=True,
-            )
+            y_prob = model.decision_function(X_test)
+
+        # Convert decision scores to a probability-like scale
+        # for ROC-AUC only when predict_proba is unavailable.
+        if not hasattr(model, "predict_proba"):
+            from sklearn.preprocessing import MinMaxScaler
+            y_prob = MinMaxScaler().fit_transform(
+                np.asarray(y_prob).reshape(-1, 1)
+            ).ravel()
+
+        probabilities[name] = y_prob
+        predictions[name] = y_pred
+
+        rows.append({
+            "Model": name,
+            "Accuracy": accuracy_score(y_test, y_pred),
+            "Precision": precision_score(
+                y_test, y_pred, zero_division=0
+            ),
+            "Recall": recall_score(
+                y_test, y_pred, zero_division=0
+            ),
+            "F1": f1_score(
+                y_test, y_pred, zero_division=0
+            ),
+            "ROC-AUC": safe_auc(y_test, y_prob),
+            "Average Precision": average_precision_score(
+                y_test, y_prob
+            ),
+            "Brier Score": (
+                brier_score_loss(y_test, y_prob)
+                if np.min(y_prob) >= 0 and np.max(y_prob) <= 1
+                else np.nan
+            ),
+        })
+
+    metrics = pd.DataFrame(rows).sort_values(
+        "ROC-AUC",
+        ascending=False,
+    )
+
+    return metrics, probabilities, predictions
 
 
-    st.subheader("Attrition rate by category")
-    category_candidates = [
-        c for c in ["Department", "JobRole", "Gender", "MaritalStatus",
-                    "OverTime", "BusinessTravel", "JobSatisfaction"]
-        if c in df.columns
-    ]
+# ============================================================
+# SESSION STATE
+# ============================================================
 
-    if category_candidates:
-        chosen_category = st.selectbox(
-            "Choose a category",
-            category_candidates,
-            key="eda_category",
-        )
-        grouped = (
-            df.assign(_attrition=(y == "Yes").astype(int))
-            .groupby(chosen_category, dropna=False)["_attrition"]
-            .agg(["mean", "count"])
-            .reset_index()
-            .sort_values("mean", ascending=False)
-        )
-        grouped = grouped.rename(
-            columns={
-                "_attrition": "Attrition rate",
-                "mean": "Attrition rate",
-                "count": "Employees",
-            }
-        )
+if "trained_models" not in st.session_state:
+    st.session_state.trained_models = None
 
-        fig, ax = plt.subplots(figsize=(8, 4))
-        sns.barplot(
-            data=grouped,
-            x="Attrition rate",
-            y=chosen_category,
-            ax=ax,
-        )
-        ax.set_xlim(0, min(1, max(0.2, grouped["Attrition rate"].max() * 1.15)))
-        ax.set_title(f"Observed attrition by {chosen_category}")
-        st.pyplot(fig)
-        plt.close(fig)
-        st.dataframe(grouped, use_container_width=True, hide_index=True)
+if "cv_results" not in st.session_state:
+    st.session_state.cv_results = None
 
-    numeric_columns = X.select_dtypes(include=np.number).columns.tolist()
+if "metrics" not in st.session_state:
+    st.session_state.metrics = None
 
-    st.subheader("Numeric feature distributions")
-    if numeric_columns:
-        selected_numeric = st.selectbox(
-            "Choose a numeric feature",
-            numeric_columns,
-            index=numeric_columns.index("Age") if "Age" in numeric_columns else 0,
-        )
-        fig, ax = plt.subplots(figsize=(8, 4))
-        sns.histplot(
-            data=df,
-            x=selected_numeric,
-            hue=TARGET,
-            multiple="layer",
-            stat="density",
-            common_norm=False,
-            element="step",
-            ax=ax,
-        )
-        st.pyplot(fig)
-        plt.close(fig)
+if "probabilities" not in st.session_state:
+    st.session_state.probabilities = None
 
-    st.subheader("Numeric correlations")
-    if len(numeric_columns) >= 2:
-        corr = df[numeric_columns].corr(numeric_only=True)
-        fig, ax = plt.subplots(figsize=(10, 7))
-        sns.heatmap(
-            corr,
-            cmap="coolwarm",
-            center=0,
-            ax=ax,
-        )
-        st.pyplot(fig)
-        plt.close(fig)
+if "predictions" not in st.session_state:
+    st.session_state.predictions = None
 
-    with st.expander("Preview dataset"):
-        st.dataframe(df.head(50), use_container_width=True)
+if "X_train" not in st.session_state:
+    st.session_state.X_train = None
+
+if "X_test" not in st.session_state:
+    st.session_state.X_test = None
+
+if "y_train" not in st.session_state:
+    st.session_state.y_train = None
+
+if "y_test" not in st.session_state:
+    st.session_state.y_test = None
+
+if "calibrated_model" not in st.session_state:
+    st.session_state.calibrated_model = None
+
+if "calibrated_model_name" not in st.session_state:
+    st.session_state.calibrated_model_name = None
+
+
+# ============================================================
+# NAVIGATION
+# ============================================================
+
+tab_overview, tab_eda, tab_models, tab_prediction, tab_fairness = (
+    st.tabs([
+        "📋 Overview",
+        "🔎 Explore Data",
+        "🤖 Model Lab",
+        "🎯 Prediction & Impact",
+        "⚖️ Fairness",
+    ])
+)
+
+
+# ============================================================
+# OVERVIEW
+# ============================================================
+
+with tab_overview:
+    st.header("Dataset overview")
+
+    total_employees = len(df)
+    attrition_count = int(y.sum())
+    attrition_rate = float(y.mean() * 100)
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Employees", f"{total_employees:,}")
+    col2.metric("Attrition cases", f"{attrition_count:,}")
+    col3.metric("Attrition rate", f"{attrition_rate:.1f}%")
+    col4.metric("Predictor columns", f"{X.shape[1]}")
+
+    st.subheader("Dataset preview")
+    st.dataframe(df.head(20), use_container_width=True)
+
+    st.subheader("Target distribution")
+
+    target_counts = (
+        df[TARGET]
+        .map({0: "Stayed", 1: "Left"})
+        .value_counts()
+        .rename_axis("Employee outcome")
+        .reset_index(name="Employees")
+    )
+
+    fig = px.pie(
+        target_counts,
+        names="Employee outcome",
+        values="Employees",
+        hole=0.45,
+        title="Employee attrition distribution",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Data quality")
+
+    quality = pd.DataFrame({
+        "Column": df.columns,
+        "Data type": [
+            str(df[col].dtype) for col in df.columns
+        ],
+        "Missing values": [
+            int(df[col].isna().sum()) for col in df.columns
+        ],
+        "Unique values": [
+            int(df[col].nunique(dropna=False))
+            for col in df.columns
+        ],
+    })
+
+    st.dataframe(quality, use_container_width=True)
 
     st.download_button(
-        "Download loaded dataset as CSV",
+        "Download cleaned dataset",
         data=df.to_csv(index=False).encode("utf-8"),
-        file_name="ibm_hr_attrition.csv",
+        file_name="ibm_hr_attrition_cleaned.csv",
         mime="text/csv",
     )
 
 
-# ---------------------------------------------------------------------
-# Model lab
-# ---------------------------------------------------------------------
+# ============================================================
+# EXPLORATORY DATA ANALYSIS
+# ============================================================
+
+with tab_eda:
+    st.header("Exploratory data analysis")
+
+    eda_col1, eda_col2 = st.columns(2)
+
+    with eda_col1:
+        selected_column = st.selectbox(
+            "Choose a column",
+            options=X.columns.tolist(),
+        )
+
+        if selected_column in numeric_features:
+            fig = px.histogram(
+                df,
+                x=selected_column,
+                color=TARGET,
+                barmode="overlay",
+                marginal="box",
+                title=f"{selected_column} distribution by attrition",
+                labels={TARGET: "Attrition (0 = No, 1 = Yes)"},
+            )
+        else:
+            grouped = (
+                df.groupby(
+                    [selected_column, TARGET],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Employees")
+            )
+
+            fig = px.bar(
+                grouped,
+                x=selected_column,
+                y="Employees",
+                color=TARGET,
+                barmode="group",
+                title=f"Attrition by {selected_column}",
+            )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with eda_col2:
+        st.subheader("Attrition rate by category")
+
+        categorical_options = [
+            col for col in X.columns
+            if df[col].nunique() <= 20
+        ]
+
+        if categorical_options:
+            group_column = st.selectbox(
+                "Group employees by",
+                options=categorical_options,
+            )
+
+            rate_data = (
+                df.groupby(group_column, dropna=False)[TARGET]
+                .agg(["mean", "count"])
+                .reset_index()
+            )
+
+            rate_data["Attrition rate (%)"] = (
+                rate_data["mean"] * 100
+            )
+
+            fig = px.bar(
+                rate_data,
+                x=group_column,
+                y="Attrition rate (%)",
+                hover_data=["count"],
+                title=f"Attrition rate by {group_column}",
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No low-cardinality categorical columns found.")
+
+    st.subheader("Numeric correlations")
+
+    numeric_df = df.select_dtypes(include=["number"])
+
+    if numeric_df.shape[1] >= 2:
+        corr = numeric_df.corr()
+
+        fig = px.imshow(
+            corr,
+            text_auto=".2f",
+            aspect="auto",
+            color_continuous_scale="RdBu_r",
+            zmin=-1,
+            zmax=1,
+            title="Numeric feature correlation matrix",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Attrition rate by numeric feature")
+
+    if numeric_features:
+        numeric_choice = st.selectbox(
+            "Select a numeric feature",
+            options=numeric_features,
+            key="eda_numeric_choice",
+        )
+
+        box_data = df.copy()
+        box_data["Employee outcome"] = box_data[TARGET].map({
+            0: "Stayed",
+            1: "Left",
+        })
+
+        fig = px.box(
+            box_data,
+            x="Employee outcome",
+            y=numeric_choice,
+            color="Employee outcome",
+            points="outliers",
+            title=f"{numeric_choice} by employee outcome",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# MODEL LAB
+# ============================================================
 
 with tab_models:
-    st.header("Five-model training and calibration")
-    st.write(
-        "A stratified holdout set is kept separate from hyperparameter "
-        "tuning. Models are ranked by cross-validated ROC-AUC."
+    st.header("Train and compare six machine-learning models")
+
+    st.markdown(
+        """
+        All models use the same stratified train/test split.
+        Hyperparameters are selected through randomized cross-validation.
+        """
     )
 
-    st.warning(
-        "The holdout set is used for evaluation and should not be repeatedly "
-        "used to select a threshold or make model-development decisions."
-    )
+    model_names = [
+        "Logistic Regression",
+        "Random Forest",
+        "Gradient Boosting",
+        "Support Vector Machine",
+        "K-Nearest Neighbors",
+        "Decision Tree",
+    ]
 
-    if st.button("🚀 Tune all five models", type="primary", key="train_models"):
-        with st.spinner("Splitting data and tuning models..."):
-            X_train, X_test, y_train, y_test = train_test_split(
-                X,
-                y,
-                test_size=float(test_size),
-                stratify=y,
-                random_state=int(seed),
-            )
-
-            model_results, tuning_table = train_and_tune(
-                X_train,
-                y_train,
-                iterations=int(iterations),
-                cv_folds=int(cv_folds),
-            )
-
-            ranked_names = sorted(
-                model_results,
-                key=lambda name: model_results[name]["cv_auc"],
-                reverse=True,
-            )
-            best_name = ranked_names[0]
-            best_model = model_results[best_name]["model"]
-
-            # Calibration is fit using training data only. The test set
-            # remains untouched until evaluation.
-            calibrated_model = CalibratedClassifierCV(
-                estimator=clone(best_model),
-                method="sigmoid",
-                cv=int(cv_folds),
-            )
-            calibrated_model.fit(X_train, y_train)
-
-            raw_probabilities = positive_probabilities(best_model, X_test)
-            calibrated_probabilities = positive_probabilities(
-                calibrated_model, X_test
-            )
-
-            metrics = []
-            for name in ranked_names:
-                model = model_results[name]["model"]
-                probabilities = positive_probabilities(model, X_test)
-                row = {
-                    "Model": name,
-                    "CV ROC-AUC": model_results[name]["cv_auc"],
-                    **metrics_at_threshold(y_test, probabilities, 0.5),
-                }
-                metrics.append(row)
-
-            raw_metrics = metrics_at_threshold(
-                y_test, raw_probabilities, 0.5
-            )
-            calibrated_metrics = metrics_at_threshold(
-                y_test, calibrated_probabilities, 0.5
-            )
-
-            st.session_state["hr_results"] = {
-                "X_train": X_train,
-                "X_test": X_test,
-                "y_train": y_train,
-                "y_test": y_test,
-                "models": model_results,
-                "tuning_table": tuning_table,
-                "best_name": best_name,
-                "best_model": best_model,
-                "calibrated_model": calibrated_model,
-                "raw_probabilities": raw_probabilities,
-                "calibrated_probabilities": calibrated_probabilities,
-                "model_metrics": pd.DataFrame(metrics),
-                "raw_metrics": raw_metrics,
-                "calibrated_metrics": calibrated_metrics,
-            }
-
-    results = st.session_state.get("hr_results")
-
-    if results is None:
-        st.info(
-            "Click **Tune all five models** to train, evaluate, and calibrate "
-            "the classifiers. Training may take a few minutes."
-        )
-    else:
-        st.success(f"Best cross-validated model: {results['best_name']}")
-
-        st.subheader("Hyperparameter search results")
-        st.dataframe(
-            results["tuning_table"],
-            use_container_width=True,
-            hide_index=True,
+    with st.expander("Models included", expanded=True):
+        st.markdown(
+            "\n".join(f"- **{name}**" for name in model_names)
         )
 
-        st.subheader("Holdout performance")
-        st.dataframe(
-            results["model_metrics"].round(4),
-            use_container_width=True,
-            hide_index=True,
+    if st.button(
+        "🚀 Train and tune all six models",
+        type="primary",
+        use_container_width=True,
+    ):
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=test_size / 100,
+            random_state=RANDOM_STATE,
+            stratify=y,
         )
 
-        st.subheader("Calibration comparison")
-        calibration_comparison = pd.DataFrame(
-            [
-                {
-                    "Model": results["best_name"] + " (uncalibrated)",
-                    **results["raw_metrics"],
-                },
-                {
-                    "Model": results["best_name"] + " (calibrated)",
-                    **results["calibrated_metrics"],
-                },
-            ]
-        )
-        st.dataframe(
-            calibration_comparison.round(4),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.caption(
-            "Lower Brier score indicates better probabilistic accuracy. "
-            "Calibration does not guarantee good discrimination or fairness."
-        )
-
-        st.subheader("Calibrated model diagnostics")
-        left, right = st.columns(2)
-        with left:
-            st.pyplot(
-                plot_confusion(
-                    results["y_test"],
-                    results["calibrated_probabilities"],
-                    0.5,
+        try:
+            with st.spinner(
+                "Training models. This may take a few minutes..."
+            ):
+                trained_models, cv_results = train_and_tune(
+                    X_train,
+                    y_train,
+                    cv_folds,
+                    scoring,
+                    search_iterations,
                 )
-            )
-        with right:
-            st.pyplot(
-                plot_calibration(
-                    results["y_test"],
-                    results["calibrated_probabilities"],
-                )
-            )
 
-        st.subheader("Feature importance / coefficient magnitude")
-        importance_fig = plot_feature_importance(results["best_model"])
-        if importance_fig is not None:
-            st.pyplot(importance_fig)
-            plt.close(importance_fig)
-        else:
-            st.info(
-                "This classifier does not expose native feature importances."
-            )
+                metrics, probabilities, predictions = (
+                    evaluate_models(
+                        trained_models,
+                        X_test,
+                        y_test,
+                    )
+                )
+
+            st.session_state.trained_models = trained_models
+            st.session_state.cv_results = cv_results
+            st.session_state.metrics = metrics
+            st.session_state.probabilities = probabilities
+            st.session_state.predictions = predictions
+            st.session_state.X_train = X_train
+            st.session_state.X_test = X_test
+            st.session_state.y_train = y_train
+            st.session_state.y_test = y_test
+            st.session_state.calibrated_model = None
+            st.session_state.calibrated_model_name = None
+
+            st.success("All six models were trained successfully.")
+
+        except Exception as exc:
+            st.error(f"Training failed: {exc}")
+
+    if st.session_state.metrics is not None:
+        metrics = st.session_state.metrics
+
+        st.subheader("Test-set performance")
+
+        display_metrics = metrics.copy()
+
+        numeric_metric_cols = display_metrics.select_dtypes(
+            include=["number"]
+        ).columns
+
+        display_metrics[numeric_metric_cols] = (
+            display_metrics[numeric_metric_cols].round(4)
+        )
+
+        st.dataframe(
+            display_metrics,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        metric_choice = st.selectbox(
+            "Compare models using",
+            options=[
+                "ROC-AUC",
+                "F1",
+                "Recall",
+                "Precision",
+                "Accuracy",
+                "Average Precision",
+            ],
+            index=0,
+        )
+
+        chart_metrics = metrics.sort_values(
+            metric_choice,
+            ascending=True,
+        )
+
+        fig = px.bar(
+            chart_metrics,
+            x=metric_choice,
+            y="Model",
+            orientation="h",
+            title=f"Model comparison: {metric_choice}",
+            text_auto=".3f",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Cross-validation search results")
+        st.dataframe(
+            st.session_state.cv_results,
+            use_container_width=True,
+            hide_index=True,
+        )
 
         st.download_button(
-            "Download holdout model metrics",
-            data=results["model_metrics"].to_csv(index=False).encode("utf-8"),
-            file_name="hr_model_metrics.csv",
+            "Download model comparison",
+            data=metrics.to_csv(index=False).encode("utf-8"),
+            file_name="hr_attrition_model_comparison.csv",
             mime="text/csv",
         )
 
+        st.subheader("ROC curves")
 
-# ---------------------------------------------------------------------
-# Individual prediction
-# ---------------------------------------------------------------------
+        y_test = st.session_state.y_test
+        fig = go.Figure()
 
-with tab_predict:
-    st.header("Employee attrition-risk estimate")
-    st.write(
-        "Choose an existing employee record as a starting point, then edit "
-        "the available features. The score is a statistical estimate, not "
-        "a certainty or a causal assessment."
-    )
+        for name, probabilities in (
+            st.session_state.probabilities.items()
+        ):
+            fpr, tpr, _ = roc_curve(
+                y_test,
+                probabilities,
+            )
 
-    results = st.session_state.get("hr_results")
+            auc = safe_auc(y_test, probabilities)
 
-    if results is None:
-        st.info("Train the five models in the Model lab tab first.")
-    else:
-        model_choice = st.radio(
-            "Prediction model",
-            ["Calibrated best model", "Uncalibrated best model"],
-            horizontal=True,
+            fig.add_trace(
+                go.Scatter(
+                    x=fpr,
+                    y=tpr,
+                    mode="lines",
+                    name=f"{name} (AUC={auc:.3f})",
+                )
+            )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[0, 1],
+                y=[0, 1],
+                mode="lines",
+                line=dict(dash="dash"),
+                name="Random baseline",
+            )
         )
 
-        source_index = st.selectbox(
-            "Starting employee record",
-            options=list(range(len(df))),
-            format_func=lambda i: (
-                f"Record {i + 1}"
-                + (
-                    f" — Employee #{df.iloc[i]['EmployeeNumber']}"
-                    if "EmployeeNumber" in df.columns else ""
-                )
+        fig.update_layout(
+            title="ROC curve comparison",
+            xaxis_title="False positive rate",
+            yaxis_title="True positive rate",
+            legend_title="Model",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Confusion matrix")
+
+        chosen_model_name = st.selectbox(
+            "Select model for confusion matrix",
+            options=list(
+                st.session_state.trained_models.keys()
             ),
         )
 
-        original = X.iloc[source_index].copy()
-        edited: dict[str, Any] = {}
+        y_pred = st.session_state.predictions[
+            chosen_model_name
+        ]
 
-        with st.form("prediction_form"):
-            st.subheader("Employee attributes")
-            columns = st.columns(3)
+        cm = confusion_matrix(
+            st.session_state.y_test,
+            y_pred,
+            labels=[0, 1],
+        )
 
-            for i, column in enumerate(feature_columns):
-                with columns[i % 3]:
-                    series = X[column]
+        fig = px.imshow(
+            cm,
+            text_auto=True,
+            x=["Predicted stayed", "Predicted left"],
+            y=["Actually stayed", "Actually left"],
+            labels={
+                "x": "Prediction",
+                "y": "Actual outcome",
+                "color": "Employees",
+            },
+            title=f"Confusion matrix: {chosen_model_name}",
+            color_continuous_scale="Blues",
+        )
 
-                    if pd.api.types.is_numeric_dtype(series):
-                        median = float(series.median())
-                        minimum = float(series.min())
-                        maximum = float(series.max())
-                        value = original[column]
+        st.plotly_chart(fig, use_container_width=True)
 
-                        if pd.isna(value):
-                            value = median
+        st.subheader("Feature importance")
 
-                        if minimum == maximum:
-                            edited[column] = value
+        importance_name = st.selectbox(
+            "Choose model for feature importance",
+            options=[
+                "Logistic Regression",
+                "Random Forest",
+                "Gradient Boosting",
+                "Decision Tree",
+            ],
+            key="importance_model",
+        )
+
+        importance_model = (
+            st.session_state.trained_models[
+                importance_name
+            ]
+        )
+
+        classifier = importance_model.named_steps["classifier"]
+        preprocessor = importance_model.named_steps["preprocessor"]
+
+        try:
+            feature_names = preprocessor.get_feature_names_out()
+
+            if hasattr(classifier, "feature_importances_"):
+                importance_values = classifier.feature_importances_
+            elif hasattr(classifier, "coef_"):
+                importance_values = np.abs(
+                    classifier.coef_[0]
+                )
+            else:
+                importance_values = None
+
+            if importance_values is not None:
+                importance_df = pd.DataFrame({
+                    "Feature": feature_names,
+                    "Importance": importance_values,
+                }).sort_values(
+                    "Importance",
+                    ascending=False,
+                ).head(20)
+
+                fig = px.bar(
+                    importance_df.sort_values("Importance"),
+                    x="Importance",
+                    y="Feature",
+                    orientation="h",
+                    title=f"Top features: {importance_name}",
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                )
+            else:
+                st.info(
+                    "Feature importance is not directly available "
+                    "for this classifier."
+                )
+
+        except Exception as exc:
+            st.info(f"Could not calculate feature importance: {exc}")
+
+        st.subheader("Probability calibration")
+
+        st.write(
+            "Calibration can make predicted probabilities more reliable. "
+            "The calibrated model is fitted using training data only."
+        )
+
+        calibration_name = st.selectbox(
+            "Choose model to calibrate",
+            options=list(
+                st.session_state.trained_models.keys()
+            ),
+            key="calibration_model",
+        )
+
+        calibration_method = st.radio(
+            "Calibration method",
+            options=["sigmoid", "isotonic"],
+            horizontal=True,
+        )
+
+        if st.button("Calibrate selected model"):
+            base_model = clone(
+                st.session_state.trained_models[
+                    calibration_name
+                ]
+            )
+
+            try:
+                try:
+                    calibrated = CalibratedClassifierCV(
+                        estimator=base_model,
+                        method=calibration_method,
+                        cv=3,
+                    )
+                except TypeError:
+                    calibrated = CalibratedClassifierCV(
+                        base_estimator=base_model,
+                        method=calibration_method,
+                        cv=3,
+                    )
+
+                with st.spinner("Calibrating probabilities..."):
+                    calibrated.fit(
+                        st.session_state.X_train,
+                        st.session_state.y_train,
+                    )
+
+                st.session_state.calibrated_model = calibrated
+                st.session_state.calibrated_model_name = (
+                    calibration_name
+                )
+
+                st.success(
+                    f"{calibration_name} calibrated successfully."
+                )
+
+            except Exception as exc:
+                st.error(f"Calibration failed: {exc}")
+
+        if st.session_state.calibrated_model is not None:
+            calibrated = st.session_state.calibrated_model
+
+            calibrated_probs = calibrated.predict_proba(
+                st.session_state.X_test
+            )[:, 1]
+
+            original_probs = calibrated_name_probs = (
+                st.session_state.probabilities[
+                    st.session_state.calibrated_model_name
+                ]
+            )
+
+            calibration_metrics = pd.DataFrame([
+                {
+                    "Version": "Original model",
+                    "ROC-AUC": safe_auc(
+                        st.session_state.y_test,
+                        original_probs,
+                    ),
+                    "Brier score": brier_score_loss(
+                        st.session_state.y_test,
+                        original_probs,
+                    ),
+                },
+                {
+                    "Version": "Calibrated model",
+                    "ROC-AUC": safe_auc(
+                        st.session_state.y_test,
+                        calibrated_probs,
+                    ),
+                    "Brier score": brier_score_loss(
+                        st.session_state.y_test,
+                        calibrated_probs,
+                    ),
+                },
+            ])
+
+            st.dataframe(
+                calibration_metrics.round(4),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.caption(
+                "Lower Brier score is better. Calibration does not "
+                "guarantee improved discrimination or fairness."
+            )
+
+
+# ============================================================
+# PREDICTION AND BUSINESS IMPACT
+# ============================================================
+
+with tab_prediction:
+    st.header("Employee attrition prediction")
+
+    if st.session_state.trained_models is None:
+        st.info(
+            "Open the Model Lab tab and train the six models first."
+        )
+    else:
+        selected_model_name = st.selectbox(
+            "Prediction model",
+            options=list(
+                st.session_state.trained_models.keys()
+            ),
+        )
+
+        use_calibrated = False
+
+        if st.session_state.calibrated_model is not None:
+            use_calibrated = st.checkbox(
+                (
+                    "Use calibrated probabilities "
+                    f"({st.session_state.calibrated_model_name})"
+                ),
+                value=(
+                    selected_model_name
+                    == st.session_state.calibrated_model_name
+                ),
+            )
+
+        st.subheader("Enter employee characteristics")
+
+        with st.form("employee_prediction_form"):
+            input_values = {}
+
+            cols = st.columns(3)
+
+            for index, column in enumerate(X.columns):
+                container = cols[index % 3]
+
+                with container:
+                    if column in categorical_features:
+                        options = sorted(
+                            X[column]
+                            .dropna()
+                            .astype(str)
+                            .unique()
+                            .tolist()
+                        )
+
+                        if not options:
+                            input_values[column] = ""
                         else:
-                            integer_like = (
-                                pd.api.types.is_integer_dtype(series)
-                                or np.all(
-                                    np.isclose(
-                                        series.dropna() % 1,
-                                        0,
-                                    )
-                                )
+                            input_values[column] = st.selectbox(
+                                column,
+                                options=options,
+                                key=f"prediction_{column}",
                             )
 
-                            if integer_like:
-                                edited[column] = st.number_input(
-                                    column,
-                                    min_value=int(minimum),
-                                    max_value=int(maximum),
-                                    value=int(value),
-                                    step=1,
-                                )
-                            else:
-                                edited[column] = st.number_input(
-                                    column,
-                                    min_value=minimum,
-                                    max_value=maximum,
-                                    value=float(value),
-                                    format="%.3f",
-                                )
                     else:
-                        choices = sorted(
-                            series.dropna().astype(str).unique().tolist()
-                        )
-                        current = str(original[column])
-                        if current not in choices and choices:
-                            current = choices[0]
+                        series = pd.to_numeric(
+                            X[column],
+                            errors="coerce",
+                        ).dropna()
 
-                        edited[column] = st.selectbox(
-                            column,
-                            choices,
-                            index=choices.index(current) if choices else 0,
+                        default_value = (
+                            float(series.median())
+                            if not series.empty
+                            else 0.0
                         )
 
-            submitted = st.form_submit_button(
-                "Estimate attrition probability",
+                        min_value = (
+                            float(series.min())
+                            if not series.empty
+                            else 0.0
+                        )
+
+                        max_value = (
+                            float(series.max())
+                            if not series.empty
+                            else 100.0
+                        )
+
+                        if min_value == max_value:
+                            input_values[column] = default_value
+                            st.number_input(
+                                column,
+                                value=default_value,
+                                disabled=True,
+                                key=f"prediction_{column}",
+                            )
+                        else:
+                            input_values[column] = st.number_input(
+                                column,
+                                min_value=min_value,
+                                max_value=max_value,
+                                value=default_value,
+                                key=f"prediction_{column}",
+                            )
+
+            predict_clicked = st.form_submit_button(
+                "Predict attrition risk",
                 type="primary",
             )
 
-        if submitted:
+        if predict_clicked:
             input_df = pd.DataFrame(
-                [edited],
-                columns=feature_columns,
+                [input_values],
+                columns=X.columns,
             )
 
-            if model_choice == "Calibrated best model":
-                model = results["calibrated_model"]
-            else:
-                model = results["best_model"]
-
-            probability = float(
-                positive_probabilities(model, input_df)[0]
-            )
-
-            st.subheader("Prediction result")
-            c1, c2 = st.columns([1, 2])
-
-            with c1:
-                st.metric("Estimated attrition probability", f"{probability:.1%}")
-
-            with c2:
-                st.progress(min(max(probability, 0.0), 1.0))
-                st.write(
-                    "This probability reflects the fitted model and the "
-                    "historical dataset. It should not be interpreted as a "
-                    "validated individual forecast."
+            # Restore the same numeric and categorical types.
+            for col in numeric_features:
+                input_df[col] = pd.to_numeric(
+                    input_df[col],
+                    errors="coerce",
                 )
 
-            if probability >= 0.5:
+            for col in categorical_features:
+                input_df[col] = input_df[col].astype(str)
+
+            if (
+                use_calibrated
+                and st.session_state.calibrated_model is not None
+                and selected_model_name
+                == st.session_state.calibrated_model_name
+            ):
+                prediction_model = (
+                    st.session_state.calibrated_model
+                )
+            else:
+                prediction_model = (
+                    st.session_state.trained_models[
+                        selected_model_name
+                    ]
+                )
+
+            probability = float(
+                prediction_model.predict_proba(
+                    input_df
+                )[0, 1]
+            )
+
+            threshold = st.slider(
+                "Attrition alert threshold",
+                min_value=0.10,
+                max_value=0.90,
+                value=0.50,
+                step=0.05,
+                key="prediction_threshold",
+            )
+
+            prediction = int(probability >= threshold)
+
+            result_col1, result_col2 = st.columns(2)
+
+            result_col1.metric(
+                "Estimated attrition probability",
+                f"{probability:.1%}",
+            )
+
+            result_col2.metric(
+                "Risk classification",
+                "Higher risk" if prediction else "Lower risk",
+            )
+
+            st.progress(
+                min(max(probability, 0.0), 1.0)
+            )
+
+            if prediction:
                 st.warning(
-                    "The model score is at or above the illustrative 50% "
-                    "threshold. Review context with a qualified human."
+                    "This employee's estimated risk is above the "
+                    "selected threshold. Treat this as a signal for "
+                    "supportive review, not a decision about the employee."
                 )
             else:
                 st.success(
-                    "The model score is below the illustrative 50% threshold. "
-                    "A lower score does not mean attrition is impossible."
+                    "This employee's estimated risk is below the "
+                    "selected threshold. A low score does not mean "
+                    "attrition is impossible."
                 )
 
             st.caption(
-                "Do not use this score to deny employment opportunities, "
-                "discipline employees, or make other consequential decisions "
-                "without appropriate validation, governance, and review."
+                "This is a statistical estimate, not a certainty. "
+                "Use predictions to guide voluntary, supportive "
+                "retention conversations—not hiring, firing, promotion, "
+                "or other consequential decisions."
             )
 
+        st.divider()
+        st.subheader("Business impact scenario")
 
-# ---------------------------------------------------------------------
-# Business impact scenario
-# ---------------------------------------------------------------------
+        impact_col1, impact_col2, impact_col3 = st.columns(3)
 
-with tab_impact:
-    st.header("Business impact scenario")
-    st.write(
-        "Estimate potential financial implications under user-defined "
-        "assumptions. This is a scenario calculator, not a causal estimate "
-        "of savings from deploying the model."
-    )
+        with impact_col1:
+            workforce_size = st.number_input(
+                "Employees in workforce",
+                min_value=1,
+                max_value=1_000_000,
+                value=len(df),
+            )
 
-    results = st.session_state.get("hr_results")
+        with impact_col2:
+            expected_attrition_rate = st.slider(
+                "Expected attrition rate (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(round(y.mean() * 100, 1)),
+                step=0.5,
+            )
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        headcount = st.number_input(
-            "Workforce size",
-            min_value=1,
-            max_value=10_000_000,
-            value=int(len(df)),
-            step=10,
-        )
-        annual_attrition = st.slider(
-            "Expected annual attrition rate",
-            min_value=0.0,
-            max_value=1.0,
-            value=float((y == "Yes").mean()),
-            step=0.01,
-        )
-    with col2:
-        replacement_cost = st.number_input(
-            "Cost per departure",
-            min_value=0.0,
-            value=15000.0,
-            step=1000.0,
-            help="Enter costs in your chosen currency.",
-        )
-        intervention_cost = st.number_input(
-            "Intervention cost per employee",
-            min_value=0.0,
-            value=500.0,
-            step=50.0,
-        )
-    with col3:
-        outreach_fraction = st.slider(
-            "Share of workforce targeted",
-            min_value=0.01,
-            max_value=1.0,
-            value=0.20,
-            step=0.01,
-        )
-        effectiveness = st.slider(
-            "Assumed attrition reduction among targeted leavers",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.15,
-            step=0.01,
-            help="A hypothetical assumption; it is not learned from this dataset.",
+        with impact_col3:
+            replacement_cost = st.number_input(
+                "Estimated replacement cost per departure",
+                min_value=0.0,
+                value=15000.0,
+                step=1000.0,
+            )
+
+        current_departures = (
+            workforce_size * expected_attrition_rate / 100
         )
 
-    expected_departures = headcount * annual_attrition
-    targeted_employees = int(round(headcount * outreach_fraction))
-    expected_targeted_departures = expected_departures * outreach_fraction
-    departures_avoided = expected_targeted_departures * effectiveness
-
-    gross_avoided_cost = departures_avoided * replacement_cost
-    intervention_spend = targeted_employees * intervention_cost
-    net_impact = gross_avoided_cost - intervention_spend
-    roi = (
-        net_impact / intervention_spend
-        if intervention_spend > 0 else np.nan
-    )
-
-    st.divider()
-    a, b, c, d = st.columns(4)
-    a.metric("Expected annual departures", f"{expected_departures:,.0f}")
-    b.metric("Targeted employees", f"{targeted_employees:,}")
-    c.metric("Hypothetical avoided departures", f"{departures_avoided:,.1f}")
-    d.metric("Estimated net impact", f"{net_impact:,.0f}")
-
-    st.write(f"**Gross avoided replacement cost:** {gross_avoided_cost:,.2f}")
-    st.write(f"**Intervention spend:** {intervention_spend:,.2f}")
-    st.write(
-        "**Scenario ROI:** "
-        + (f"{roi:.1%}" if np.isfinite(roi) else "Not defined")
-    )
-
-    st.caption(
-        "Currency is unspecified and should be consistent across all inputs. "
-        "The calculation assumes targeted employees have the same baseline "
-        "attrition rate as the workforce. Real intervention effectiveness "
-        "requires prospective evaluation or a credible causal design."
-    )
-
-    if results is not None:
-        st.subheader("Model-informed targeting illustration")
-        threshold = st.slider(
-            "Illustrative risk threshold",
-            min_value=0.05,
-            max_value=0.95,
-            value=0.50,
-            step=0.05,
-            key="impact_threshold",
+        st.metric(
+            "Estimated annual replacement cost",
+            f"{current_departures * replacement_cost:,.0f}",
         )
-        probs = results["calibrated_probabilities"]
-        holdout = results["X_test"].copy()
-        flagged = int((probs >= threshold).sum())
 
-        st.write(
-            f"At this threshold, **{flagged:,} of {len(holdout):,}** holdout "
-            "records would be flagged by the calibrated model."
+        retention_improvement = st.slider(
+            "Hypothetical reduction in departures (%)",
+            min_value=0,
+            max_value=50,
+            value=10,
+            step=5,
         )
+
+        avoided_departures = (
+            current_departures
+            * retention_improvement
+            / 100
+        )
+
+        estimated_savings = (
+            avoided_departures * replacement_cost
+        )
+
+        impact_col1, impact_col2 = st.columns(2)
+
+        impact_col1.metric(
+            "Hypothetical departures avoided",
+            f"{avoided_departures:,.1f}",
+        )
+
+        impact_col2.metric(
+            "Potential gross savings",
+            f"{estimated_savings:,.0f}",
+        )
+
         st.caption(
-            "This is a holdout-set count, not a projection of the number of "
-            "employees to target in a future workforce."
+            "Scenario estimates only. They assume the selected reduction "
+            "is achieved and exclude intervention costs, uncertainty, "
+            "and other business effects."
         )
 
 
-# ---------------------------------------------------------------------
-# Fairness diagnostics
-# ---------------------------------------------------------------------
+# ============================================================
+# FAIRNESS CHECK
+# ============================================================
 
 with tab_fairness:
-    st.header("Fairness and subgroup performance")
-    st.write(
-        "These diagnostics compare error rates and prediction rates across "
-        "groups in the holdout data. They are descriptive checks, not proof "
-        "that a model is fair or legally compliant."
+    st.header("Fairness and subgroup evaluation")
+
+    st.warning(
+        "Subgroup performance comparisons are diagnostic, not proof "
+        "of fairness. Protected characteristics and proxy variables "
+        "require careful legal, ethical, and organizational review."
     )
 
-    results = st.session_state.get("hr_results")
-
-    if results is None:
-        st.info("Train the five models in the Model lab tab first.")
-    else:
-        fairness_threshold = st.slider(
-            "Classification threshold for fairness checks",
-            min_value=0.05,
-            max_value=0.95,
-            value=0.50,
-            step=0.05,
-            key="fairness_threshold",
+    if st.session_state.trained_models is None:
+        st.info(
+            "Train the models in the Model Lab tab to enable evaluation."
         )
-
-        available_groups = [
-            column for column in SENSITIVE_FEATURES
-            if column in df.columns
+    else:
+        subgroup_options = [
+            col for col in X.columns
+            if df[col].nunique(dropna=True) <= 20
         ]
 
-        if not available_groups:
-            st.warning("No configured subgroup columns are available.")
+        if not subgroup_options:
+            st.info("No suitable subgroup columns were found.")
         else:
-            selected_group = st.selectbox(
-                "Subgroup feature",
-                available_groups,
+            fairness_model_name = st.selectbox(
+                "Model for subgroup evaluation",
+                options=list(
+                    st.session_state.trained_models.keys()
+                ),
+                key="fairness_model",
             )
 
-            test_indices = results["X_test"].index
-            holdout_df = df.loc[test_indices].reset_index(drop=True)
-            holdout_y = results["y_test"].reset_index(drop=True)
-            holdout_probs = results["calibrated_probabilities"]
-
-            report = fairness_report(
-                holdout_df,
-                holdout_y,
-                holdout_probs,
-                fairness_threshold,
-                selected_group,
+            subgroup_column = st.selectbox(
+                "Group employees by",
+                options=subgroup_options,
+                key="fairness_group",
             )
 
-            if report.empty:
-                st.warning("No subgroup results could be calculated.")
-            else:
-                f1, f2, f3 = st.columns(3)
-                f1.metric(
-                    "Flagged-rate gap",
-                    f"{report.attrs['flagged_rate_gap']:.1%}",
-                )
-                f2.metric(
-                    "True-positive-rate gap",
-                    (
-                        f"{report.attrs['tpr_gap']:.1%}"
-                        if np.isfinite(report.attrs["tpr_gap"])
-                        else "Unavailable"
+            fairness_threshold = st.slider(
+                "Positive prediction threshold",
+                min_value=0.10,
+                max_value=0.90,
+                value=0.50,
+                step=0.05,
+                key="fairness_threshold",
+            )
+
+            fairness_test = st.session_state.X_test.copy()
+            fairness_test[TARGET] = (
+                st.session_state.y_test.to_numpy()
+            )
+
+            fairness_test["_group"] = (
+                fairness_test[subgroup_column]
+                .fillna("Missing")
+                .astype(str)
+                .values
+            )
+
+            fairness_model = (
+                st.session_state.trained_models[
+                    fairness_model_name
+                ]
+            )
+
+            fairness_probs = fairness_model.predict_proba(
+                st.session_state.X_test
+            )[:, 1]
+
+            fairness_test["_probability"] = fairness_probs
+            fairness_test["_predicted"] = (
+                fairness_probs >= fairness_threshold
+            ).astype(int)
+
+            fairness_rows = []
+
+            for group_name, group in fairness_test.groupby(
+                "_group",
+                dropna=False,
+            ):
+                actual = group[TARGET].astype(int)
+                predicted = group["_predicted"].astype(int)
+
+                positives = int(actual.sum())
+                negatives = int(len(actual) - positives)
+
+                fairness_rows.append({
+                    "Group": str(group_name),
+                    "Employees": len(group),
+                    "Actual attrition rate": actual.mean(),
+                    "Predicted positive rate": predicted.mean(),
+                    "Recall / true positive rate": (
+                        recall_score(
+                            actual,
+                            predicted,
+                            zero_division=0,
+                        )
+                        if positives > 0
+                        else np.nan
                     ),
-                )
-                f3.metric(
-                    "False-positive-rate gap",
-                    (
-                        f"{report.attrs['fpr_gap']:.1%}"
-                        if np.isfinite(report.attrs["fpr_gap"])
-                        else "Unavailable"
+                    "False positive rate": (
+                        (
+                            (
+                                (predicted == 1)
+                                & (actual == 0)
+                            ).sum()
+                        ) / negatives
+                        if negatives > 0
+                        else np.nan
                     ),
-                )
+                    "Precision": precision_score(
+                        actual,
+                        predicted,
+                        zero_division=0,
+                    ),
+                })
 
-                st.dataframe(
-                    report.round(4),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            fairness_df = pd.DataFrame(fairness_rows)
 
-                fig, ax = plt.subplots(figsize=(9, 5))
-                plot_data = report.melt(
-                    id_vars="Group",
-                    value_vars=[
-                        "Observed attrition rate",
-                        "Flagged rate",
-                    ],
-                    var_name="Measure",
-                    value_name="Rate",
-                )
-                sns.barplot(
-                    data=plot_data,
-                    x="Group",
-                    y="Rate",
-                    hue="Measure",
-                    ax=ax,
-                )
-                ax.set_ylim(0, 1)
-                ax.set_title(f"Rates by {selected_group}")
-                ax.tick_params(axis="x", rotation=25)
-                fig.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
+            st.subheader("Subgroup metrics")
 
-                st.download_button(
-                    "Download fairness report",
-                    data=report.to_csv(index=False).encode("utf-8"),
-                    file_name=f"fairness_{selected_group.lower()}.csv",
-                    mime="text/csv",
-                )
+            st.dataframe(
+                fairness_df.round(3),
+                use_container_width=True,
+                hide_index=True,
+            )
 
-                st.markdown(
-                     "Fairness metrics are descriptive indicators, not proof of fairness "
-                        "or legal compliance. Review group sizes, data quality, uncertainty, "
-                        "and relevant employment regulations before drawing conclusions."
+            fairness_metric = st.selectbox(
+                "Metric to visualize",
+                options=[
+                    "Actual attrition rate",
+                    "Predicted positive rate",
+                    "Recall / true positive rate",
+                    "False positive rate",
+                    "Precision",
+                ],
+            )
 
-                )
+            fig = px.bar(
+                fairness_df,
+                x="Group",
+                y=fairness_metric,
+                hover_data=["Employees"],
+                title=f"{fairness_metric} by {subgroup_column}",
+            )
+
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "Download subgroup evaluation",
+                data=fairness_df.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name="hr_attrition_fairness_metrics.csv",
+                mime="text/csv",
+            )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
 
 st.divider()
+
 st.caption(
-    "IBM HR Attrition Analytics • Educational decision-support prototype • "
-    "Validate data provenance, model quality, security, privacy, and fairness "
-    "before any real-world use."
+    "HR Attrition Analytics | IBM HR Attrition dataset | "
+    "For educational and analytical use. Validate performance, "
+    "privacy, legal compliance, and fairness before any real-world use."
 )
