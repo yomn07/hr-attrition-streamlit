@@ -104,5 +104,5 @@ def train_and_tune(
         })
         progress.progress((index + 1) / len(models))
 
-    status.success("All seven models have been trained.")
+    status.success(f"{len(best_models)} model(s) trained.")
     return best_models, pd.DataFrame(rows)
