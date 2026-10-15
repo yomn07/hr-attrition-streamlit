@@ -6,6 +6,7 @@ import streamlit as st
 from sklearn.base import clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, confusion_matrix, roc_curve
+from sklearn.inspection import permutation_importance
 from evaluation import evaluate_models, safe_auc
 from state import save_training_results
 from config import MODEL_NAMES, TUNING_METHODS
@@ -340,7 +341,48 @@ def _render_calibration():
         "Lower Brier score is better. Calibration does not "
         "guarantee improved discrimination or fairness."
     )
+def _render_permutation_importance():
+    st.subheader("Permutation importance (works for every model)")
 
+    name = st.selectbox(
+        "Choose model",
+        options=list(st.session_state.trained_models.keys()),
+        key="perm_model",
+    )
+
+    if st.button("Calculate permutation importance"):
+        model = st.session_state.trained_models[name]
+        with st.spinner("Shuffling features..."):
+            result = permutation_importance(
+                model,
+                st.session_state.X_test,
+                st.session_state.y_test,
+                scoring="roc_auc",
+                n_repeats=10,
+                random_state=42,
+                n_jobs=1,
+            )
+
+        st.session_state.perm_result = pd.DataFrame({
+            "Feature": st.session_state.X_test.columns,
+            "Importance": result.importances_mean,
+            "Std": result.importances_std,
+        }).sort_values("Importance", ascending=False)
+        st.session_state.perm_name = name
+
+    if st.session_state.get("perm_result") is not None:
+        top = st.session_state.perm_result.head(15)
+        fig = px.bar(
+            top.sort_values("Importance"),
+            x="Importance", y="Feature", orientation="h",
+            error_x="Std",
+            title=f"Permutation importance (AUC drop): {st.session_state.perm_name}",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Importance = how much ROC-AUC falls when that feature is shuffled. "
+            "Values near zero (or negative) mean the model barely uses it."
+        )
 def _results_are_current():
     """False if cv_results was saved by an older version of the app."""
     results = st.session_state.cv_results
@@ -368,4 +410,5 @@ def render(data, settings):
     _render_roc()
     _render_confusion()
     _render_importance()
+    _render_permutation_importance()
     _render_calibration()
