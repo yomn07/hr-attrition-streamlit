@@ -112,6 +112,13 @@ def mean_abs(shap_df):
 
 
 def compute_pdp(model, X, feature, grid_resolution=20):
+    """Average predicted attrition probability as one numeric feature varies."""
+    # partial_dependence writes decimal grid values into the column,
+    # which fails on integer columns. Floats can hold both.
+    X = X.copy()
+    int_columns = X.select_dtypes(include="integer").columns
+    X[int_columns] = X[int_columns].astype(float)
+
     result = partial_dependence(
         model, X, [feature], grid_resolution=grid_resolution, kind="average"
     )
