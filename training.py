@@ -44,8 +44,13 @@ def train_and_tune(
     numeric_features, categorical_features,
     cv_folds, scoring, method,
     search_iterations=8, manual_params=None,
+    selected_models=None,
 ):
-    models = model_search_spaces(numeric_features, categorical_features)
+    all_models = model_search_spaces(numeric_features, categorical_features)
+    models = {
+        name: spec for name, spec in all_models.items()
+        if selected_models is None or name in selected_models
+    }
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
 
     best_models, rows = {}, []
