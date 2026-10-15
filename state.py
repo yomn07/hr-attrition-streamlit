@@ -13,6 +13,7 @@ STATE_DEFAULTS = {
     "y_test": None,
     "calibrated_model": None,
     "calibrated_model_name": None,
+    "shap_cache": None,
 }
 
 
@@ -39,6 +40,7 @@ def save_training_results(
     st.session_state.y_test = y_test
     st.session_state.calibrated_model = None
     st.session_state.calibrated_model_name = None
+    st.session_state.shap_cache = {}
 
 
 def is_trained() -> bool:
