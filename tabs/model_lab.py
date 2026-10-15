@@ -341,7 +341,10 @@ def _render_calibration():
         "guarantee improved discrimination or fairness."
     )
 
-
+def _results_are_current():
+    """False if cv_results was saved by an older version of the app."""
+    results = st.session_state.cv_results
+    return results is not None and {"Method", "_params"}.issubset(results.columns)
 # ------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------
@@ -351,6 +354,13 @@ def render(data, settings):
     _render_training(data, settings)
 
     if st.session_state.metrics is None:
+        return
+
+    if not _results_are_current():
+        st.info(
+            "These results come from an older version of the app. "
+            "Click the train button again to refresh them."
+        )
         return
 
     _render_best_parameters()
