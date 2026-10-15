@@ -6,11 +6,13 @@ import streamlit as st
 from sklearn.base import clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, confusion_matrix, roc_curve
-
-from config import MODEL_NAMES
 from evaluation import evaluate_models, safe_auc
 from state import save_training_results
-from training import split_data, train_and_tune
+from config import MODEL_NAMES, TUNING_METHODS
+from models import DEFAULT_PARAMS, model_search_spaces
+from training import clean_params, space_size, split_data, train_and_tune
+
+RANDOM, GRID, MANUAL = TUNING_METHODS
 
 IMPORTANCE_MODELS = [
     "Logistic Regression",
@@ -20,36 +22,99 @@ IMPORTANCE_MODELS = [
     "Decision Tree",
 ]
 
+def _render_manual_editor(data):
+    """One dropdown per hyperparameter. Returns {model: {param: value}}."""
+    spaces = model_search_spaces(data.numeric_features, data.categorical_features)
+    manual = {}
 
+    with st.expander("Set hyperparameters manually", expanded=True):
+        for name, (_, space) in spaces.items():
+            st.markdown(f"**{name}**")
+            cols = st.columns(3)
+            manual[name] = {}
+            for i, (param, options) in enumerate(space.items()):
+                manual[name][param] = cols[i % 3].selectbox(
+                    param.replace("classifier__", ""),
+                    options=options,
+                    index=options.index(DEFAULT_PARAMS[name][param]),
+                    format_func=str,
+                    key=f"manual_{name}_{param}",
+                )
+    return manual
+
+
+def _render_grid_size(data, settings):
+    """Grid search can be huge, so show the cost before the user clicks."""
+    spaces = model_search_spaces(data.numeric_features, data.categorical_features)
+    rows = [
+        {
+            "Model": name,
+            "Combinations": space_size(space),
+            "Model fits": space_size(space) * settings.cv_folds,
+        }
+        for name, (_, space) in spaces.items()
+    ]
+    table = pd.DataFrame(rows)
+    total = int(table["Model fits"].sum())
+
+    with st.expander(f"Grid search size: {total:,} model fits", expanded=total > 3000):
+        st.dataframe(table, hide_index=True, use_container_width=True)
+        if total > 3000:
+            st.warning(
+                "This is a large grid, mostly from XGBoost and Gradient "
+                "Boosting. It can take a long time. Lower the CV folds or "
+                "use Randomized search for a faster run."
+            )
+
+
+def _render_best_parameters():
+    """Always shown after training, for every method."""
+    results = st.session_state.cv_results
+
+    st.subheader("Selected hyperparameters")
+    st.caption(f"Method: **{results['Method'].iloc[0]}**")
+
+    st.dataframe(
+        results.drop(columns=["_params", "Method"]),
+        use_container_width=True, hide_index=True,
+    )
+
+    name = st.selectbox(
+        "Show parameters for", options=results["Model"].tolist(), key="params_model"
+    )
+    st.json(results.loc[results["Model"] == name, "_params"].iloc[0])
 # ------------------------------------------------------------
 # Training
 # ------------------------------------------------------------
 def _render_training(data, settings):
     st.markdown(
         "All models use the same stratified train/test split. "
-        "Hyperparameters are selected through randomized cross-validation."
+        f"Hyperparameter selection: **{settings.tuning_method}**."
     )
 
-    with st.expander("Models included", expanded=True):
+    with st.expander("Models included", expanded=False):
         st.markdown("\n".join(f"- **{name}**" for name in MODEL_NAMES))
 
+    manual_params = None
+    if settings.tuning_method == MANUAL:
+        manual_params = _render_manual_editor(data)
+    elif settings.tuning_method == GRID:
+        _render_grid_size(data, settings)
+
     if not st.button(
-        "🚀 Train and tune all seven models",
-        type="primary",
-        use_container_width=True,
+        "🚀 Train all seven models", type="primary", use_container_width=True
     ):
         return
 
-    X_train, X_test, y_train, y_test = split_data(
-        data.X, data.y, settings.test_size
-    )
+    X_train, X_test, y_train, y_test = split_data(data.X, data.y, settings.test_size)
 
     try:
         with st.spinner("Training models. This may take a few minutes..."):
             trained_models, cv_results = train_and_tune(
                 X_train, y_train,
                 data.numeric_features, data.categorical_features,
-                settings.cv_folds, settings.scoring, settings.search_iterations,
+                settings.cv_folds, settings.scoring, settings.tuning_method,
+                settings.search_iterations, manual_params,
             )
             metrics, probabilities, predictions = evaluate_models(
                 trained_models, X_test, y_test
@@ -63,8 +128,6 @@ def _render_training(data, settings):
 
     except Exception as exc:
         st.error(f"Training failed: {exc}")
-
-
 # ------------------------------------------------------------
 # Metrics table and comparison chart
 # ------------------------------------------------------------
@@ -290,6 +353,7 @@ def render(data, settings):
     if st.session_state.metrics is None:
         return
 
+    _render_best_parameters()
     _render_metrics()
     _render_roc()
     _render_confusion()
