@@ -4,7 +4,8 @@ warnings.filterwarnings("ignore")
 import streamlit as st
 from data import load_raw_data, prepare_data
 from sidebar import render_sidebar
-from state import init_state, is_trained
+from state import init_state
+from tabs import overview, eda
 
 st.set_page_config(page_title="HR Attrition Analytics", page_icon="📊", layout="wide")
 st.title("📊 HR Employee Attrition Analytics")
@@ -18,5 +19,10 @@ except Exception as exc:
 init_state()
 settings = render_sidebar()
 
-st.write("Settings:", settings)
-st.write("Models trained?", is_trained())
+tab_overview, tab_eda = st.tabs(["📋 Overview", "🔎 Explore Data"])
+
+with tab_overview:
+    overview.render(data)
+
+with tab_eda:
+    eda.render(data)
