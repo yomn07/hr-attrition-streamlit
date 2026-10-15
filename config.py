@@ -13,3 +13,4 @@ MODEL_NAMES = [
     "K-Nearest Neighbors",
     "Decision Tree",
 ]
+TUNING_METHODS = ["Randomized search", "Grid search", "Manual"]
