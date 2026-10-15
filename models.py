@@ -133,3 +133,31 @@ def model_search_spaces(numeric_features, categorical_features):
     )
 
     return models
+DEFAULT_PARAMS = {
+    "Logistic Regression": {"classifier__C": 1.0, "classifier__solver": "lbfgs"},
+    "Random Forest": {
+        "classifier__n_estimators": 200, "classifier__max_depth": None,
+        "classifier__min_samples_leaf": 1, "classifier__max_features": "sqrt",
+    },
+    "XGBoost": {
+        "classifier__n_estimators": 200, "classifier__max_depth": 3,
+        "classifier__learning_rate": 0.05, "classifier__subsample": 0.85,
+        "classifier__colsample_bytree": 0.85, "classifier__min_child_weight": 1,
+        "classifier__reg_lambda": 1,
+    },
+    "Gradient Boosting": {
+        "classifier__n_estimators": 100, "classifier__learning_rate": 0.1,
+        "classifier__max_depth": 3, "classifier__min_samples_leaf": 1,
+        "classifier__subsample": 1.0,
+    },
+    "Support Vector Machine": {
+        "classifier__C": 1.0, "classifier__kernel": "rbf", "classifier__gamma": "scale",
+    },
+    "K-Nearest Neighbors": {
+        "classifier__n_neighbors": 9, "classifier__weights": "uniform", "classifier__p": 2,
+    },
+    "Decision Tree": {
+        "classifier__max_depth": 5, "classifier__min_samples_split": 2,
+        "classifier__min_samples_leaf": 4, "classifier__criterion": "gini",
+    },
+}
