@@ -1,13 +1,19 @@
+import math
+
 import pandas as pd
 import streamlit as st
 from sklearn.model_selection import (
+    GridSearchCV,
     RandomizedSearchCV,
     StratifiedKFold,
+    cross_val_score,
     train_test_split,
 )
 
-from config import RANDOM_STATE
+from config import RANDOM_STATE, TUNING_METHODS
 from models import model_search_spaces
+
+RANDOM, GRID, MANUAL = TUNING_METHODS
 
 
 def split_data(X, y, test_size_percent):
@@ -19,47 +25,79 @@ def split_data(X, y, test_size_percent):
     )
 
 
+def space_size(parameters):
+    """Number of combinations in a hyperparameter grid."""
+    return math.prod(len(v) for v in parameters.values())
+
+
+def clean_params(params):
+    """{'classifier__C': 1.0} -> {'C': 1.0}"""
+    return {k.replace("classifier__", ""): v for k, v in params.items()}
+
+
+def format_params(params):
+    return ", ".join(f"{k}={v}" for k, v in clean_params(params).items())
+
+
 def train_and_tune(
     X_train, y_train,
     numeric_features, categorical_features,
-    cv_folds, scoring, search_iterations,
+    cv_folds, scoring, method,
+    search_iterations=8, manual_params=None,
 ):
     models = model_search_spaces(numeric_features, categorical_features)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
 
-    cv = StratifiedKFold(
-        n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE
-    )
-
-    best_models = {}
-    cv_results = []
-
+    best_models, rows = {}, []
     progress = st.progress(0)
     status = st.empty()
 
     for index, (name, (pipeline, parameters)) in enumerate(models.items()):
-        status.write(f"Training model {index + 1}/{len(models)}: **{name}**")
+        status.write(f"Training model {index + 1}/{len(models)}: **{name}** ({method})")
+        size = space_size(parameters)
 
-        search = RandomizedSearchCV(
-            estimator=pipeline,
-            param_distributions=parameters,
-            n_iter=search_iterations,
-            scoring=scoring,
-            cv=cv,
-            refit=True,
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            error_score="raise",
-        )
-        search.fit(X_train, y_train)
+        if method == GRID:
+            search = GridSearchCV(
+                pipeline, parameters, scoring=scoring, cv=cv,
+                refit=True, n_jobs=-1, error_score="raise",
+            )
+            search.fit(X_train, y_train)
+            model, score, params, tried = (
+                search.best_estimator_, search.best_score_, search.best_params_, size,
+            )
 
-        best_models[name] = search.best_estimator_
-        cv_results.append({
+        elif method == RANDOM:
+            n_iter = min(search_iterations, size)
+            search = RandomizedSearchCV(
+                pipeline, parameters, n_iter=n_iter, scoring=scoring, cv=cv,
+                refit=True, random_state=RANDOM_STATE, n_jobs=-1,
+                error_score="raise",
+            )
+            search.fit(X_train, y_train)
+            model, score, params, tried = (
+                search.best_estimator_, search.best_score_, search.best_params_, n_iter,
+            )
+
+        else:  # MANUAL: no search, just the values the user chose
+            params = manual_params[name]
+            pipeline.set_params(**params)
+            scores = cross_val_score(
+                pipeline, X_train, y_train, scoring=scoring, cv=cv, n_jobs=-1
+            )
+            pipeline.fit(X_train, y_train)
+            model, score, tried = pipeline, scores.mean(), 1
+
+        best_models[name] = model
+        rows.append({
             "Model": name,
-            "Best CV score": search.best_score_,
-            "Best parameters": str(search.best_params_),
+            "Method": method,
+            "Combinations tried": tried,
+            "Search space size": size,
+            "CV score": score,
+            "Parameters": format_params(params),
+            "_params": clean_params(params),  # dict, used for the JSON view
         })
-
         progress.progress((index + 1) / len(models))
 
-    status.success("All seven models have been trained and tuned.")
-    return best_models, pd.DataFrame(cv_results)
+    status.success("All seven models have been trained.")
+    return best_models, pd.DataFrame(rows)
