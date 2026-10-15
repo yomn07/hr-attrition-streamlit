@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
-
+from explainability.plots import local_bar
+from explainability.shap_utils import compute_shap
 from state import is_trained
 
 LAST_INPUT_KEY = "last_prediction_input"
@@ -152,7 +153,30 @@ def _render_business_impact(data):
         "business effects."
     )
 
+def _render_explanation(model_name, input_df, data):
+    st.subheader("Why this prediction?")
 
+    if not st.toggle("Explain this prediction (SHAP)", key="explain_toggle"):
+        return
+
+    model = st.session_state.trained_models[model_name]
+    cache_key = (model_name, input_df.to_json())
+    cached = st.session_state.get("last_explanation")
+
+    if cached is None or cached[0] != cache_key:
+        with st.spinner("Computing SHAP values..."):
+            result = compute_shap(model, st.session_state.X_train, input_df)
+        st.session_state.last_explanation = (cache_key, result)
+    else:
+        result = cached[1]
+
+    st.plotly_chart(
+        local_bar(result, 0, data.numeric_features), use_container_width=True
+    )
+    st.caption(
+        "Red bars raise this employee's risk, blue bars lower it. This "
+        "explains the selected model's raw score, before any calibration."
+    )
 # ------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------
@@ -185,6 +209,6 @@ def render(data):
 
     if st.session_state.get(LAST_INPUT_KEY) is not None:
         _render_result(model, st.session_state[LAST_INPUT_KEY], threshold)
-
+        _render_explanation(selected_name, st.session_state[LAST_INPUT_KEY], data)
     st.divider()
     _render_business_impact(data)
