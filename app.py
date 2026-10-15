@@ -11,7 +11,7 @@ st.set_page_config(page_title="HR Attrition Analytics", page_icon="📊", layout
 
 st.title("📊 HR Employee Attrition Analytics")
 st.caption(
-    "Explore employee attrition, compare seven machine-learning models, "
+    "Explore employee attrition, compare machine-learning models, "
     "estimate attrition risk, and evaluate potential business impact."
 )
 
