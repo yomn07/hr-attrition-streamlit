@@ -5,7 +5,7 @@ import streamlit as st
 from data import load_raw_data, prepare_data
 from sidebar import render_sidebar
 from state import init_state
-from tabs import overview, eda, model_lab, prediction, fairness
+from tabs import overview, eda, model_lab,explain, prediction, fairness
 
 st.set_page_config(page_title="HR Attrition Analytics", page_icon="📊", layout="wide")
 
@@ -24,13 +24,16 @@ except Exception as exc:
 init_state()
 settings = render_sidebar()
 
-tab_overview, tab_eda, tab_models, tab_prediction, tab_fairness = st.tabs([
+tab_overview, tab_eda, tab_models, tab_explain, tab_prediction, tab_fairness = st.tabs([
     "📋 Overview",
     "🔎 Explore Data",
     "🤖 Model Lab",
+    "🔍 Explainability",
     "🎯 Prediction & Impact",
     "⚖️ Fairness",
 ])
+
+
 
 with tab_overview:
     overview.render(data)
@@ -40,7 +43,8 @@ with tab_eda:
 
 with tab_models:
     model_lab.render(data, settings)
-
+with tab_explain:
+    explain.render(data)
 with tab_prediction:
     prediction.render(data)
 
