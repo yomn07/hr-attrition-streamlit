@@ -23,13 +23,14 @@ IMPORTANCE_MODELS = [
     "Decision Tree",
 ]
 
-def _render_manual_editor(data):
+def _render_manual_editor(data, selected):
     """One dropdown per hyperparameter. Returns {model: {param: value}}."""
     spaces = model_search_spaces(data.numeric_features, data.categorical_features)
     manual = {}
 
     with st.expander("Set hyperparameters manually", expanded=True):
-        for name, (_, space) in spaces.items():
+        for name in selected:
+            _, space = spaces[name]
             st.markdown(f"**{name}**")
             cols = st.columns(3)
             manual[name] = {}
@@ -44,16 +45,16 @@ def _render_manual_editor(data):
     return manual
 
 
-def _render_grid_size(data, settings):
+def _render_grid_size(data, settings, selected):
     """Grid search can be huge, so show the cost before the user clicks."""
     spaces = model_search_spaces(data.numeric_features, data.categorical_features)
     rows = [
         {
             "Model": name,
-            "Combinations": space_size(space),
-            "Model fits": space_size(space) * settings.cv_folds,
+            "Combinations": space_size(spaces[name][1]),
+            "Model fits": space_size(spaces[name][1]) * settings.cv_folds,
         }
-        for name, (_, space) in spaces.items()
+        for name in selected
     ]
     table = pd.DataFrame(rows)
     total = int(table["Model fits"].sum())
@@ -62,9 +63,8 @@ def _render_grid_size(data, settings):
         st.dataframe(table, hide_index=True, use_container_width=True)
         if total > 3000:
             st.warning(
-                "This is a large grid, mostly from XGBoost and Gradient "
-                "Boosting. It can take a long time. Lower the CV folds or "
-                "use Randomized search for a faster run."
+                "This is a large grid. Lower the CV folds, choose fewer "
+                "models, or use Randomized search for a faster run."
             )
 
 
@@ -84,6 +84,19 @@ def _render_best_parameters():
         "Show parameters for", options=results["Model"].tolist(), key="params_model"
     )
     st.json(results.loc[results["Model"] == name, "_params"].iloc[0])
+
+
+def _render_model_picker():
+    """Multiselect: everything selected = all models, or pick one or two."""
+    selected = st.multiselect(
+        "Models to train",
+        options=MODEL_NAMES,
+        default=MODEL_NAMES,
+        key="selected_models",
+        help="Remove models you don't need. Fewer models train faster.",
+    )
+    # Keep the original order, whatever order the user clicked in
+    return [name for name in MODEL_NAMES if name in selected]
 # ------------------------------------------------------------
 # Training
 # ------------------------------------------------------------
@@ -93,18 +106,23 @@ def _render_training(data, settings):
         f"Hyperparameter selection: **{settings.tuning_method}**."
     )
 
-    with st.expander("Models included", expanded=False):
-        st.markdown("\n".join(f"- **{name}**" for name in MODEL_NAMES))
+    selected = _render_model_picker()
+
+    if not selected:
+        st.warning("Select at least one model to train.")
+        return
 
     manual_params = None
     if settings.tuning_method == MANUAL:
-        manual_params = _render_manual_editor(data)
+        manual_params = _render_manual_editor(data, selected)
     elif settings.tuning_method == GRID:
-        _render_grid_size(data, settings)
+        _render_grid_size(data, settings, selected)
 
-    if not st.button(
-        "🚀 Train all seven models", type="primary", use_container_width=True
-    ):
+    label = (
+        "🚀 Train all models" if len(selected) == len(MODEL_NAMES)
+        else f"🚀 Train {len(selected)} selected model(s)"
+    )
+    if not st.button(label, type="primary", use_container_width=True):
         return
 
     X_train, X_test, y_train, y_test = split_data(data.X, data.y, settings.test_size)
@@ -116,6 +134,7 @@ def _render_training(data, settings):
                 data.numeric_features, data.categorical_features,
                 settings.cv_folds, settings.scoring, settings.tuning_method,
                 settings.search_iterations, manual_params,
+                selected_models=selected,
             )
             metrics, probabilities, predictions = evaluate_models(
                 trained_models, X_test, y_test
@@ -125,7 +144,7 @@ def _render_training(data, settings):
             trained_models, cv_results, metrics, probabilities, predictions,
             X_train, X_test, y_train, y_test,
         )
-        st.success("All seven models were trained successfully.")
+        st.success(f"Trained: {', '.join(trained_models)}.")
 
     except Exception as exc:
         st.error(f"Training failed: {exc}")
@@ -232,9 +251,17 @@ def _render_confusion():
 def _render_importance():
     st.subheader("Feature importance")
 
+    available = [m for m in IMPORTANCE_MODELS if m in st.session_state.trained_models]
+    if not available:
+        st.info(
+            "Built-in importance needs Logistic Regression or a tree model. "
+            "Use permutation importance or the Explainability tab for the others."
+        )
+        return
+
     name = st.selectbox(
         "Choose model for feature importance",
-        options=IMPORTANCE_MODELS,
+        options=available,
         key="importance_model",
     )
 
@@ -391,7 +418,7 @@ def _results_are_current():
 # Entry point
 # ------------------------------------------------------------
 def render(data, settings):
-    st.header("Train and compare seven machine-learning models")
+    st.header("Train and compare machine-learning models")
 
     _render_training(data, settings)
 
