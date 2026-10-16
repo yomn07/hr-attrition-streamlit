@@ -1,6 +1,9 @@
 import plotly.express as px
 import streamlit as st
-
+import numpy as np
+from sklearn.decomposition import PCA
+import pandas as pd
+from preprocessing import make_preprocessor
 from config import TARGET
 
 OUTCOME = "Employee outcome"
@@ -38,7 +41,84 @@ def _render_class_distribution(df):
         "metric here."
     )
 
+def _render_scatter(plot_df, numeric_features):
+    st.subheader("Scatter plot (nuage de points)")
 
+    if len(numeric_features) < 2:
+        st.info("At least two numeric features are needed.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    x_col = col1.selectbox(
+        "X axis", numeric_features,
+        index=numeric_features.index("Age") if "Age" in numeric_features else 0,
+        key="scatter_x",
+    )
+    y_col = col2.selectbox(
+        "Y axis", numeric_features,
+        index=(numeric_features.index("MonthlyIncome")
+               if "MonthlyIncome" in numeric_features else 1),
+        key="scatter_y",
+    )
+    jitter = col3.slider(
+        "Jitter", 0.0, 1.0, 0.3, step=0.1,
+        help="Many columns hold whole numbers, so dots stack on top of each "
+             "other. Jitter adds a small random shift to reveal them.",
+    )
+
+    data = plot_df[[x_col, y_col, OUTCOME]].copy()
+
+    # Draw "Stayed" first so the rarer "Left" dots stay visible on top
+    data = data.sort_values(OUTCOME, ascending=False)
+
+    if jitter > 0:
+        rng = np.random.default_rng(42)
+        for col in (x_col, y_col):
+            step = data[col].diff().abs().replace(0, np.nan).min()
+            step = step if step == step else 1  # fall back if NaN
+            data[col] = data[col] + rng.uniform(-jitter, jitter, len(data)) * step
+
+    fig = px.scatter(
+        data, x=x_col, y=y_col, color=OUTCOME,
+        color_discrete_map=COLORS,
+        category_orders={OUTCOME: ["Stayed", "Left"]},
+        opacity=0.6, marginal_x="box", marginal_y="box",
+        title=f"{y_col} vs {x_col}",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_pca_scatter(data):
+    st.subheader("All features in 2D (PCA)")
+
+    preprocessor = make_preprocessor(
+        data.numeric_features, data.categorical_features, scale_numeric=True
+    )
+    transformed = preprocessor.fit_transform(data.X)
+
+    pca = PCA(n_components=2, random_state=42)
+    points = pca.fit_transform(transformed)
+    explained = pca.explained_variance_ratio_.sum()
+
+    pca_df = pd.DataFrame({
+        "PC1": points[:, 0],
+        "PC2": points[:, 1],
+        OUTCOME: data.y.map({0: "Stayed", 1: "Left"}).to_numpy(),
+    }).sort_values(OUTCOME, ascending=False)
+
+    fig = px.scatter(
+        pca_df, x="PC1", y="PC2", color=OUTCOME,
+        color_discrete_map=COLORS,
+        category_orders={OUTCOME: ["Stayed", "Left"]},
+        opacity=0.6,
+        title=f"PCA projection ({explained:.0%} of the variance kept)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Each dot is one employee, built from all features combined. If red "
+        "and blue dots are mixed together, no simple boundary separates the "
+        "classes, which is why the models top out around 0.80 to 0.83 AUC."
+    )
 def render(data):
     df, X = data.df, data.X
     numeric_features = data.numeric_features
@@ -49,7 +129,8 @@ def render(data):
     st.header("Exploratory data analysis")
 
     _render_class_distribution(df)
-
+    _render_scatter(plot_df, numeric_features)
+    _render_pca_scatter(data)
     col_left, col_right = st.columns(2)
 
     with col_left:
