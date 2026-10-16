@@ -40,34 +40,6 @@ def _render_compute(model_name, model, data):
     return result
 
 
-def _render_global(result, data):
-    st.subheader("Global importance: what the model relies on")
-
-    grouped = st.toggle(
-        "Combine one-hot columns into the original feature", value=True
-    )
-    importance = mean_abs(shap_frame(
-        result, data.numeric_features, data.categorical_features, grouped
-    ))
-    st.plotly_chart(
-        plots.global_bar(importance, result["units"]), use_container_width=True
-    )
-
-    st.subheader("Direction of effect")
-    ungrouped = shap_frame(
-        result, data.numeric_features, data.categorical_features, False
-    )
-    st.plotly_chart(
-        plots.beeswarm(ungrouped, result["X_transformed"]),
-        use_container_width=True,
-    )
-    st.caption(
-        "Each dot is an employee. Dots on the right push that employee's "
-        "risk up; dots on the left push it down. Red means a high value "
-        "of the feature, blue a low value."
-    )
-
-
 def _render_local(result, model, data):
     st.subheader("Local explanation: why this employee?")
 
@@ -86,8 +58,21 @@ def _render_local(result, model, data):
         "Employee (sorted by predicted risk)", order, format_func=describe
     )
 
+    col1, col2 = st.columns(2)
+    chart_type = col1.radio(
+        "Chart", ["Waterfall", "Bar"], horizontal=True, key="local_chart"
+    )
+    grouped = col2.toggle(
+        "Combine one-hot columns into the original feature",
+        value=True, key="local_grouped",
+    )
+
+    plot = plots.waterfall if chart_type == "Waterfall" else plots.local_bar
     st.plotly_chart(
-        plots.local_bar(result, position, data.numeric_features),
+        plot(
+            result, position,
+            data.numeric_features, data.categorical_features, grouped,
+        ),
         use_container_width=True,
     )
 
@@ -95,8 +80,10 @@ def _render_local(result, model, data):
     st.caption(
         f"Base value {result['base']:.3f} + contributions {total:+.3f} "
         f"= {result['base'] + total:.3f} ({result['units']}). "
+        f"Predicted attrition probability: {probabilities[position]:.0%}. "
         "The base value is the model's average output."
     )
+
     with st.expander("Plain-language report for this employee"):
         st.markdown(build_report(
             result, data, float(probabilities[position]), 0.5, position=position
