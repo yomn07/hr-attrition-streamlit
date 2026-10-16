@@ -1,6 +1,6 @@
 import numpy as np
 import streamlit as st
-
+from explainability.report import build_report
 from config import RANDOM_STATE
 from explainability import plots
 from explainability.shap_utils import (
@@ -97,7 +97,10 @@ def _render_local(result, model, data):
         f"= {result['base'] + total:.3f} ({result['units']}). "
         "The base value is the model's average output."
     )
-
+    with st.expander("Plain-language report for this employee"):
+        st.markdown(build_report(
+            result, data, float(probabilities[position]), 0.5, position=position
+        ))
 
 def _render_pdp(model, data):
     st.subheader("Partial dependence: how a feature changes risk")
