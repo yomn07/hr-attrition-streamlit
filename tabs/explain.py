@@ -39,7 +39,32 @@ def _render_compute(model_name, model, data):
         st.info("Click the button to compute explanations for this model.")
     return result
 
+def _render_global(result, data):
+    st.subheader("Global importance: what the model relies on")
 
+    grouped = st.toggle(
+        "Combine one-hot columns into the original feature", value=True
+    )
+    importance = mean_abs(shap_frame(
+        result, data.numeric_features, data.categorical_features, grouped
+    ))
+    st.plotly_chart(
+        plots.global_bar(importance, result["units"]), use_container_width=True
+    )
+
+    st.subheader("Direction of effect")
+    ungrouped = shap_frame(
+        result, data.numeric_features, data.categorical_features, False
+    )
+    st.plotly_chart(
+        plots.beeswarm(ungrouped, result["X_transformed"]),
+        use_container_width=True,
+    )
+    st.caption(
+        "Each dot is an employee. Dots on the right push that employee's "
+        "risk up; dots on the left push it down. Red means a high value "
+        "of the feature, blue a low value."
+    )
 def _render_local(result, model, data):
     st.subheader("Local explanation: why this employee?")
 
